@@ -1,16 +1,13 @@
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { GoogleGenAI } = require('@google/genai');
 const config = require('./config');
 
-const genAI = new GoogleGenerativeAI(config.geminiApiKey);
+const ai = new GoogleGenAI({ apiKey: config.geminiApiKey });
 
 const SYSTEM_PROMPT = `You are a helpful WhatsApp assistant replying on behalf of the phone's owner,
 who is currently away.
 
 Given one incoming WhatsApp message:
 1. If it is a general, timeless question, answer it directly, briefly, and helpfully.
-   Do not say the owner is away unless that is relevant. Never pretend to know live,
-   current, or private information that you cannot verify (for example, today's price,
-   live weather, or a current schedule). For those, explain the limitation briefly.
 2. For personal requests, messages, or action items, write a short polite reply that
    says the owner is away and will follow up. Do not invent commitments, prices, dates,
    or facts.
@@ -18,10 +15,14 @@ Given one incoming WhatsApp message:
    deadline with a date or time is a scheduled task. When its date and time are clear,
    provide scheduledFor as an ISO 8601 timestamp with the supplied offset. Otherwise,
    set scheduledFor to null. Do not guess missing dates or times.
+4. Set needsLiveData to true for questions that need current information, including
+   current prices, exchange rates, weather, news, live scores, schedules, availability,
+   market data, or anything described as today/latest/current. Set it to false otherwise.
 
 Respond ONLY with JSON in exactly this shape:
 {
-  "reply": "<reply to send>",
+  "reply": "<reply to send when needsLiveData is false>",
+  "needsLiveData": true | false,
   "tasks": [
     {
       "task": "<short imperative task>",
@@ -33,15 +34,78 @@ Respond ONLY with JSON in exactly this shape:
 
 No markdown fences or extra commentary.`;
 
-const model = genAI.getGenerativeModel({
-  model: config.geminiModel,
-  systemInstruction: SYSTEM_PROMPT,
-  generationConfig: {
-    temperature: 0.4,
-    maxOutputTokens: 1024,
-    responseMimeType: 'application/json',
-  },
-});
+const LIVE_ANSWER_PROMPT = `Answer the user's question using current, web-grounded information.
+Be concise and accurate. Include essential units, date, or location when relevant.
+Never invent facts. Do not mention being an AI or the owner's away status.
+Return plain text only; source links will be added separately.`;
+
+function getPakistanTimestamp() {
+  // Pakistan Standard Time is UTC+05:00 year-round.
+  return new Date(Date.now() + (5 * 60 * 60 * 1000))
+    .toISOString()
+    .replace('Z', '+05:00');
+}
+
+function parseStructuredResponse(raw) {
+  try {
+    return JSON.parse(raw || '{}');
+  } catch (err) {
+    console.error('[geminiClient] Failed to parse model output as JSON:', raw);
+    const match = raw?.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)/);
+    const salvaged = match ? match[1].replace(/\\"/g, '"') : null;
+    return {
+      reply: salvaged || "Thanks for your message — I'm away right now but will get back to you soon.",
+      needsLiveData: false,
+      tasks: [],
+    };
+  }
+}
+
+function normalizeTasks(tasks) {
+  if (!Array.isArray(tasks)) return [];
+
+  return tasks
+    .filter((item) => item && typeof item.task === 'string' && item.task.trim())
+    .map((item) => ({
+      task: item.task.trim(),
+      kind: item.kind === 'meeting' ? 'meeting' : 'action',
+      scheduledFor: typeof item.scheduledFor === 'string' && item.scheduledFor.trim()
+        ? item.scheduledFor.trim()
+        : null,
+    }));
+}
+
+function formatSources(response) {
+  const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+  const sources = [];
+  const seen = new Set();
+
+  for (const chunk of chunks) {
+    const source = chunk.web;
+    if (!source?.uri || seen.has(source.uri)) continue;
+    seen.add(source.uri);
+    sources.push(`[${source.title || 'Source'}](${source.uri})`);
+    if (sources.length === 2) break;
+  }
+
+  return sources.length ? `\n\nSources: ${sources.join(' · ')}` : '';
+}
+
+async function getLiveAnswer(messageText) {
+  const response = await ai.models.generateContent({
+    model: config.geminiModel,
+    contents: `Current time in Asia/Karachi: ${getPakistanTimestamp()}\nUser question: ${messageText}`,
+    config: {
+      systemInstruction: LIVE_ANSWER_PROMPT,
+      tools: [{ googleSearch: {} }],
+      temperature: 0.2,
+      maxOutputTokens: 512,
+    },
+  });
+
+  const answer = (response.text || '').trim();
+  return answer ? `${answer}${formatSources(response)}` : '';
+}
 
 /**
  * @param {string} messageText - incoming message content
@@ -49,43 +113,25 @@ const model = genAI.getGenerativeModel({
  * @returns {Promise<{reply: string, tasks: Array<{task: string, kind: string, scheduledFor: string | null}>}>}
  */
 async function processMessage(messageText, senderName) {
-  // Pakistan Standard Time is UTC+05:00 year-round.
-  const nowInPakistan = new Date(Date.now() + (5 * 60 * 60 * 1000))
-    .toISOString()
-    .replace('Z', '+05:00');
-  const userContent = `Current date and time in Asia/Karachi: ${nowInPakistan}\nSender: ${senderName || 'Unknown'}\nMessage: ${messageText}`;
+  const response = await ai.models.generateContent({
+    model: config.geminiModel,
+    contents: `Current date and time in Asia/Karachi: ${getPakistanTimestamp()}\nSender: ${senderName || 'Unknown'}\nMessage: ${messageText}`,
+    config: {
+      systemInstruction: SYSTEM_PROMPT,
+      temperature: 0.4,
+      maxOutputTokens: 1024,
+      responseMimeType: 'application/json',
+    },
+  });
 
-  const result = await model.generateContent(userContent);
-  const raw = result.response.text() || '{}';
-
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (err) {
-    console.error('[geminiClient] Failed to parse model output as JSON:', raw);
-    // Try to salvage a usable reply if the JSON was cut off mid-string
-    // (e.g. `{"reply": "Hello, thanks for...` with no closing quote/brace).
-    const match = raw.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)/);
-    const salvaged = match ? match[1].replace(/\\"/g, '"') : null;
-    parsed = {
-      reply: salvaged || "Thanks for your message — I'm away right now but will get back to you soon.",
-      tasks: [],
-    };
-  }
+  const parsed = parseStructuredResponse(response.text);
+  const reply = parsed.needsLiveData
+    ? await getLiveAnswer(messageText)
+    : (typeof parsed.reply === 'string' ? parsed.reply : '');
 
   return {
-    reply: typeof parsed.reply === 'string' ? parsed.reply : '',
-    tasks: Array.isArray(parsed.tasks)
-      ? parsed.tasks
-        .filter((item) => item && typeof item.task === 'string' && item.task.trim())
-        .map((item) => ({
-          task: item.task.trim(),
-          kind: item.kind === 'meeting' ? 'meeting' : 'action',
-          scheduledFor: typeof item.scheduledFor === 'string' && item.scheduledFor.trim()
-            ? item.scheduledFor.trim()
-            : null,
-        }))
-      : [],
+    reply,
+    tasks: normalizeTasks(parsed.tasks),
   };
 }
 
