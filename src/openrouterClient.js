@@ -1,6 +1,6 @@
 const config = require('./config');
 
-const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
 const SYSTEM_PROMPT = `You are a helpful WhatsApp assistant replying on behalf of the phone's owner,
 who is currently away.
@@ -36,7 +36,8 @@ No markdown fences or extra commentary.`;
 const LIVE_ANSWER_PROMPT = `Answer the user's question using current, web-grounded information.
 Be concise and accurate. Include essential units, date, or location when relevant.
 Never invent facts. Do not mention being an AI or the owner's away status.
-Return plain text only; source links will be added separately.`;
+When web results are available, use them as evidence and include short source links in
+markdown when useful. Return plain text only.`;
 
 function getPakistanTimestamp() {
   // Pakistan Standard Time is UTC+05:00 year-round.
@@ -45,7 +46,16 @@ function getPakistanTimestamp() {
     .replace('Z', '+05:00');
 }
 
-async function callGroq({ model, systemPrompt, userPrompt, temperature, maxTokens, jsonMode }) {
+async function callOpenRouter({
+  model,
+  systemPrompt,
+  userPrompt,
+  temperature,
+  maxTokens,
+  jsonMode = false,
+  tools,
+  extraBody = {},
+}) {
   const body = {
     model,
     messages: [
@@ -54,24 +64,37 @@ async function callGroq({ model, systemPrompt, userPrompt, temperature, maxToken
     ],
     temperature,
     max_tokens: maxTokens,
+    ...extraBody,
   };
 
   if (jsonMode) {
+    // OpenRouter exposes an OpenAI-compatible response_format.
+    // The selected free model supports structured outputs.
     body.response_format = { type: 'json_object' };
   }
 
-  const res = await fetch(GROQ_API_URL, {
+  if (tools?.length) {
+    body.tools = tools;
+  }
+
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${config.openRouterApiKey}`,
+  };
+
+  // Optional headers recommended by OpenRouter for attribution/rankings.
+  if (config.openRouterSiteUrl) headers['HTTP-Referer'] = config.openRouterSiteUrl;
+  if (config.openRouterSiteName) headers['X-Title'] = config.openRouterSiteName;
+
+  const res = await fetch(OPENROUTER_API_URL, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.groqApiKey}`,
-    },
+    headers,
     body: JSON.stringify(body),
   });
 
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
-    throw new Error(`Groq API error ${res.status}: ${errText}`);
+    throw new Error(`OpenRouter API error ${res.status}: ${errText}`);
   }
 
   return res.json();
@@ -81,7 +104,7 @@ function parseStructuredResponse(raw) {
   try {
     return JSON.parse(raw || '{}');
   } catch (err) {
-    console.error('[groqClient] Failed to parse model output as JSON:', raw);
+    console.error('[openrouterClient] Failed to parse model output as JSON:', raw);
     const match = raw?.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)/);
     const salvaged = match ? match[1].replace(/\\"/g, '"') : null;
     return {
@@ -106,42 +129,55 @@ function normalizeTasks(tasks) {
     }));
 }
 
-function formatSources(message) {
-  // groq/compound reports the tools it ran (including web search) in
-  // message.executed_tools. Shape can vary, so this is best-effort and
-  // silently degrades to no sources if the fields aren't present.
-  const executed = message?.executed_tools || [];
-  const sources = [];
+function extractSourceLinks(message) {
   const seen = new Set();
+  const sources = [];
 
-  for (const tool of executed) {
-    const results = tool?.search_results?.results || tool?.output?.results || [];
-    for (const result of results) {
-      const url = result?.url;
-      if (!url || seen.has(url)) continue;
-      seen.add(url);
-      sources.push(`[${result.title || 'Source'}](${url})`);
-      if (sources.length === 2) break;
-    }
-    if (sources.length === 2) break;
+  // OpenRouter normalizes web search citations into message.annotations.
+  for (const annotation of message?.annotations || []) {
+    if (annotation?.type !== 'url_citation') continue;
+    const citation = annotation.url_citation || {};
+    const url = citation.url;
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    const title = citation.title || 'Source';
+    sources.push(`[${title}](${url})`);
+    if (sources.length >= 2) break;
   }
 
-  return sources.length ? `\n\nSources: ${sources.join(' · ')}` : '';
+  return sources;
+}
+
+function addSources(answer, message) {
+  const sources = extractSourceLinks(message);
+  if (!sources.length) return answer;
+  return `${answer}\n\nSources: ${sources.join(' · ')}`;
 }
 
 async function getLiveAnswer(messageText) {
-  const data = await callGroq({
-    model: config.groqLiveModel,
+  const data = await callOpenRouter({
+    model: config.openRouterLiveModel,
     systemPrompt: LIVE_ANSWER_PROMPT,
-    userPrompt: `Current time in Asia/Karachi: ${getPakistanTimestamp()}\nUser question: ${messageText}`,
+    userPrompt: `Current date and time in Asia/Karachi: ${getPakistanTimestamp()}
+User question: ${messageText}`,
     temperature: 0.2,
-    maxTokens: 512,
-    jsonMode: false,
+    maxTokens: 700,
+    tools: [
+      {
+        type: 'openrouter:web_search',
+        parameters: {
+          engine: 'auto',
+          max_results: 3,
+          max_total_results: 5,
+          max_characters: 3000,
+        },
+      },
+    ],
   });
 
   const message = data.choices?.[0]?.message;
   const answer = (message?.content || '').trim();
-  return answer ? `${answer}${formatSources(message)}` : '';
+  return answer ? addSources(answer, message) : '';
 }
 
 /**
@@ -150,10 +186,12 @@ async function getLiveAnswer(messageText) {
  * @returns {Promise<{reply: string, tasks: Array<{task: string, kind: string, scheduledFor: string | null}>}>}
  */
 async function processMessage(messageText, senderName) {
-  const data = await callGroq({
-    model: config.groqModel,
+  const data = await callOpenRouter({
+    model: config.openRouterModel,
     systemPrompt: SYSTEM_PROMPT,
-    userPrompt: `Current date and time in Asia/Karachi: ${getPakistanTimestamp()}\nSender: ${senderName || 'Unknown'}\nMessage: ${messageText}`,
+    userPrompt: `Current date and time in Asia/Karachi: ${getPakistanTimestamp()}
+Sender: ${senderName || 'Unknown'}
+Message: ${messageText}`,
     temperature: 0.4,
     maxTokens: 1024,
     jsonMode: true,
@@ -161,9 +199,17 @@ async function processMessage(messageText, senderName) {
 
   const rawContent = data.choices?.[0]?.message?.content;
   const parsed = parseStructuredResponse(rawContent);
-  const reply = parsed.needsLiveData
-    ? await getLiveAnswer(messageText)
-    : (typeof parsed.reply === 'string' ? parsed.reply : '');
+  let reply = typeof parsed.reply === 'string' ? parsed.reply : '';
+
+  if (parsed.needsLiveData) {
+    try {
+      const liveAnswer = await getLiveAnswer(messageText);
+      if (liveAnswer) reply = liveAnswer;
+    } catch (err) {
+      console.error('[openrouterClient] Live answer failed, falling back:', err.message);
+      reply = reply || "I couldn't pull up live data for that right now — I'll check and follow up.";
+    }
+  }
 
   return {
     reply,

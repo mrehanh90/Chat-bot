@@ -11,7 +11,7 @@ const { Boom } = require('@hapi/boom');
 
 const config = require('./src/config');
 const awayMode = require('./src/awayMode');
-const groqClient = require('./src/groqClient');
+const openrouterClient = require('./src/openrouterClient');
 const taskStore = require('./src/taskStore');
 
 const logger = pino({ level: 'info' });
@@ -20,7 +20,7 @@ const logger = pino({ level: 'info' });
 const processedMessageIds = new Set();
 const MAX_PROCESSED_IDS = 2000;
 
-// Basic per-chat flood guard so a chatty contact can't burn OpenAI credits.
+// Basic per-chat flood guard so a chatty contact can't burn AI API quota.
 const lastReplyAtByChat = new Map();
 
 function rememberMessageId(id) {
@@ -46,17 +46,17 @@ async function handleOwnerCommand(sock, text, replyJid) {
   const cmd = text.trim().toLowerCase();
   if (cmd === '!away on') {
     awayMode.setEnabled(true);
-    await sock.sendMessage(replyJid, { text: '✅ Away mode ENABLED. Incoming messages will get AI replies.' });
+    await sock.sendMessage(replyJid, { text: '✅ Away mode ENABLED. Incoming messages will get AI replies.', linkPreview: false });
     return true;
   }
   if (cmd === '!away off') {
     awayMode.setEnabled(false);
-    await sock.sendMessage(replyJid, { text: '✅ Away mode DISABLED. You are handling messages yourself.' });
+    await sock.sendMessage(replyJid, { text: '✅ Away mode DISABLED. You are handling messages yourself.', linkPreview: false });
     return true;
   }
   if (cmd === '!away status') {
     const enabled = awayMode.isEnabled();
-    await sock.sendMessage(replyJid, { text: `Away mode is currently ${enabled ? 'ON' : 'OFF'}.` });
+    await sock.sendMessage(replyJid, { text: `Away mode is currently ${enabled ? 'ON' : 'OFF'}.`, linkPreview: false });
     return true;
   }
   if (cmd === '!tasks') {
@@ -64,7 +64,7 @@ async function handleOwnerCommand(sock, text, replyJid) {
     const list = tasks.length
       ? tasks.map((t, i) => `${i + 1}. ${t.task} (from ${t.senderName || t.from})`).join('\n')
       : 'No pending tasks.';
-    await sock.sendMessage(replyJid, { text: `📋 Pending tasks:\n${list}` });
+    await sock.sendMessage(replyJid, { text: `📋 Pending tasks:\n${list}`, linkPreview: false });
     return true;
   }
   return false;
@@ -141,17 +141,12 @@ async function handleIncoming(sock, msg) {
   const chatJid = msg.key.remoteJid;
   const text = extractText(msg.message);
 
-  // Temporary debug line: shows exactly what WhatsApp is sending us for every
-  // message, so we can see the real JID format (@s.whatsapp.net vs @lid) and
-  // confirm text extraction. Safe to remove once things are working.
   logger.info(
     { chatJid, fromMe: msg.key.fromMe, text: text.slice(0, 80) },
     'Incoming message event'
   );
 
   // 1) Messages WE sent (fromMe): only commands from our self-chat are valid.
-  //    WhatsApp may identify that chat with an opaque @lid rather than the
-  //    phone-number JID, so resolve Baileys' stored LID-to-phone mapping.
   if (msg.key.fromMe) {
     const isOwnerChat = await isOwnerSelfChat(sock, chatJid);
 
@@ -183,34 +178,45 @@ async function handleIncoming(sock, msg) {
   const senderName = msg.pushName || undefined;
   const trimmedText = text.slice(0, config.maxInputChars);
 
-  const { reply, tasks } = await groqClient.processMessage(trimmedText, senderName);
+  // SHOW "TYPING..." STATUS
+  await sock.sendPresenceUpdate('composing', chatJid);
 
-  if (reply) {
-    await sock.sendMessage(chatJid, { text: reply });
-    lastReplyAtByChat.set(chatJid, now);
-  }
+  try {
+    const { reply, tasks } = await openrouterClient.processMessage(trimmedText, senderName);
 
-  if (tasks.length > 0) {
-    taskStore.appendTasks(tasks, {
-      senderJid: chatJid,
-      senderName,
-      chatJid,
-      originalMessage: text,
-    });
+    if (reply) {
+      // DISABLED LINK PREVIEWS
+      await sock.sendMessage(chatJid, { text: reply, linkPreview: false });
+      lastReplyAtByChat.set(chatJid, Date.now()); // use fresh timestamp
+    }
 
-    const scheduledTasks = tasks.filter((task) => task.kind === 'meeting' || task.scheduledFor);
-    const taskSummary = tasks.map((task) => {
-      const when = task.scheduledFor ? ` — ${task.scheduledFor}` : '';
-      return `- ${task.task}${when}`;
-    }).join('\n');
+    if (tasks.length > 0) {
+      taskStore.appendTasks(tasks, {
+        senderJid: chatJid,
+        senderName,
+        chatJid,
+        originalMessage: text,
+      });
 
-    // Meeting/date/time messages are forwarded verbatim to the owner's
-    // self-chat, along with the structured task saved in tasks.json.
-    await sock.sendMessage(config.ownerJid, {
-      text: scheduledTasks.length > 0
-        ? `📅 Scheduled item from ${senderName || chatJid}:\n${taskSummary}\n\nOriginal message:\n${text}`
-        : `🆕 New task(s) from ${senderName || chatJid}:\n${taskSummary}`,
-    });
+      const scheduledTasks = tasks.filter((task) => task.kind === 'meeting' || task.scheduledFor);
+      const taskSummary = tasks.map((task) => {
+        const when = task.scheduledFor ? ` — ${task.scheduledFor}` : '';
+        return `- ${task.task}${when}`;
+      }).join('\n');
+
+      // DISABLED LINK PREVIEWS FOR OWNER FORWARDING
+      await sock.sendMessage(config.ownerJid, {
+        text: scheduledTasks.length > 0
+          ? `📅 Scheduled item from ${senderName || chatJid}:\n${taskSummary}\n\nOriginal message:\n${text}`
+          : `🆕 New task(s) from ${senderName || chatJid}:\n${taskSummary}`,
+        linkPreview: false 
+      });
+    }
+  } catch (error) {
+    logger.error({ error }, 'Error processing AI response');
+  } finally {
+    // CLEAR "TYPING..." STATUS
+    await sock.sendPresenceUpdate('paused', chatJid);
   }
 }
 
@@ -232,8 +238,6 @@ connectToWhatsApp()
     process.exit(1);
   });
 
-// Graceful shutdown so the WebSocket closes cleanly instead of hanging
-// (matters most for local dev with nodemon / repeated Ctrl+C restarts).
 function shutdown(signal) {
   logger.info(`Received ${signal}, shutting down...`);
   try {

@@ -10,9 +10,14 @@ function required(name) {
 }
 
 module.exports = {
-  groqApiKey: required('GROQ_API_KEY'),
-  groqModel: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
-  groqLiveModel: process.env.GROQ_LIVE_MODEL || 'groq/compound',
+  openRouterApiKey: required('OPENROUTER_API_KEY'),
+  openRouterModel: process.env.OPENROUTER_MODEL || 'openai/gpt-oss-20b:free',
+  // Optional paid/current-data model. If empty, live web search uses the same model
+  // with OpenRouter's server-side web_search tool.
+  openRouterLiveModel: process.env.OPENROUTER_LIVE_MODEL || process.env.OPENROUTER_MODEL || 'openai/gpt-oss-20b:free',
+  openRouterSiteUrl: process.env.OPENROUTER_SITE_URL || '',
+  openRouterSiteName: process.env.OPENROUTER_SITE_NAME || 'WhatsApp AI Assistant',
+
   ownerJid: required('BOT_OWNER_NUMBER'),
   ignoreGroups: (process.env.IGNORE_GROUPS || 'true').toLowerCase() === 'true',
   maxInputChars: parseInt(process.env.MAX_INPUT_CHARS || '2000', 10),
