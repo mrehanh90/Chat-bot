@@ -10,8 +10,9 @@ function required(name) {
 }
 
 module.exports = {
-  geminiApiKey: required('GEMINI_API_KEY'),
-  geminiModel: process.env.GEMINI_MODEL || 'gemini-3.6-flash',
+  groqApiKey: required('GROQ_API_KEY'),
+  groqModel: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+  groqLiveModel: process.env.GROQ_LIVE_MODEL || 'groq/compound',
   ownerJid: required('BOT_OWNER_NUMBER'),
   ignoreGroups: (process.env.IGNORE_GROUPS || 'true').toLowerCase() === 'true',
   maxInputChars: parseInt(process.env.MAX_INPUT_CHARS || '2000', 10),

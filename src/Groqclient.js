@@ -1,7 +1,6 @@
-const { GoogleGenAI } = require('@google/genai');
 const config = require('./config');
 
-const ai = new GoogleGenAI({ apiKey: config.geminiApiKey });
+const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
 const SYSTEM_PROMPT = `You are a helpful WhatsApp assistant replying on behalf of the phone's owner,
 who is currently away.
@@ -46,11 +45,43 @@ function getPakistanTimestamp() {
     .replace('Z', '+05:00');
 }
 
+async function callGroq({ model, systemPrompt, userPrompt, temperature, maxTokens, jsonMode }) {
+  const body = {
+    model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ],
+    temperature,
+    max_tokens: maxTokens,
+  };
+
+  if (jsonMode) {
+    body.response_format = { type: 'json_object' };
+  }
+
+  const res = await fetch(GROQ_API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config.groqApiKey}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Groq API error ${res.status}: ${errText}`);
+  }
+
+  return res.json();
+}
+
 function parseStructuredResponse(raw) {
   try {
     return JSON.parse(raw || '{}');
   } catch (err) {
-    console.error('[geminiClient] Failed to parse model output as JSON:', raw);
+    console.error('[groqClient] Failed to parse model output as JSON:', raw);
     const match = raw?.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)/);
     const salvaged = match ? match[1].replace(/\\"/g, '"') : null;
     return {
@@ -75,16 +106,23 @@ function normalizeTasks(tasks) {
     }));
 }
 
-function formatSources(response) {
-  const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+function formatSources(message) {
+  // groq/compound reports the tools it ran (including web search) in
+  // message.executed_tools. Shape can vary, so this is best-effort and
+  // silently degrades to no sources if the fields aren't present.
+  const executed = message?.executed_tools || [];
   const sources = [];
   const seen = new Set();
 
-  for (const chunk of chunks) {
-    const source = chunk.web;
-    if (!source?.uri || seen.has(source.uri)) continue;
-    seen.add(source.uri);
-    sources.push(`[${source.title || 'Source'}](${source.uri})`);
+  for (const tool of executed) {
+    const results = tool?.search_results?.results || tool?.output?.results || [];
+    for (const result of results) {
+      const url = result?.url;
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      sources.push(`[${result.title || 'Source'}](${url})`);
+      if (sources.length === 2) break;
+    }
     if (sources.length === 2) break;
   }
 
@@ -92,19 +130,18 @@ function formatSources(response) {
 }
 
 async function getLiveAnswer(messageText) {
-  const response = await ai.models.generateContent({
-    model: config.geminiModel,
-    contents: `Current time in Asia/Karachi: ${getPakistanTimestamp()}\nUser question: ${messageText}`,
-    config: {
-      systemInstruction: LIVE_ANSWER_PROMPT,
-      tools: [{ googleSearch: {} }],
-      temperature: 0.2,
-      maxOutputTokens: 512,
-    },
+  const data = await callGroq({
+    model: config.groqLiveModel,
+    systemPrompt: LIVE_ANSWER_PROMPT,
+    userPrompt: `Current time in Asia/Karachi: ${getPakistanTimestamp()}\nUser question: ${messageText}`,
+    temperature: 0.2,
+    maxTokens: 512,
+    jsonMode: false,
   });
 
-  const answer = (response.text || '').trim();
-  return answer ? `${answer}${formatSources(response)}` : '';
+  const message = data.choices?.[0]?.message;
+  const answer = (message?.content || '').trim();
+  return answer ? `${answer}${formatSources(message)}` : '';
 }
 
 /**
@@ -113,18 +150,17 @@ async function getLiveAnswer(messageText) {
  * @returns {Promise<{reply: string, tasks: Array<{task: string, kind: string, scheduledFor: string | null}>}>}
  */
 async function processMessage(messageText, senderName) {
-  const response = await ai.models.generateContent({
-    model: config.geminiModel,
-    contents: `Current date and time in Asia/Karachi: ${getPakistanTimestamp()}\nSender: ${senderName || 'Unknown'}\nMessage: ${messageText}`,
-    config: {
-      systemInstruction: SYSTEM_PROMPT,
-      temperature: 0.4,
-      maxOutputTokens: 1024,
-      responseMimeType: 'application/json',
-    },
+  const data = await callGroq({
+    model: config.groqModel,
+    systemPrompt: SYSTEM_PROMPT,
+    userPrompt: `Current date and time in Asia/Karachi: ${getPakistanTimestamp()}\nSender: ${senderName || 'Unknown'}\nMessage: ${messageText}`,
+    temperature: 0.4,
+    maxTokens: 1024,
+    jsonMode: true,
   });
 
-  const parsed = parseStructuredResponse(response.text);
+  const rawContent = data.choices?.[0]?.message?.content;
+  const parsed = parseStructuredResponse(rawContent);
   const reply = parsed.needsLiveData
     ? await getLiveAnswer(messageText)
     : (typeof parsed.reply === 'string' ? parsed.reply : '');

@@ -11,7 +11,7 @@ const { Boom } = require('@hapi/boom');
 
 const config = require('./src/config');
 const awayMode = require('./src/awayMode');
-const geminiClient = require('./src/geminiClient');
+const groqClient = require('./src/groqClient');
 const taskStore = require('./src/taskStore');
 
 const logger = pino({ level: 'info' });
@@ -183,7 +183,7 @@ async function handleIncoming(sock, msg) {
   const senderName = msg.pushName || undefined;
   const trimmedText = text.slice(0, config.maxInputChars);
 
-  const { reply, tasks } = await geminiClient.processMessage(trimmedText, senderName);
+  const { reply, tasks } = await groqClient.processMessage(trimmedText, senderName);
 
   if (reply) {
     await sock.sendMessage(chatJid, { text: reply });
