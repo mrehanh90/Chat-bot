@@ -1,24 +1,25 @@
 const fs = require('fs');
-const path = require('path');
+const { getSessionPath } = require('./sessionStore');
 
-const TASKS_FILE = path.join(__dirname, '..', 'tasks.json');
+function taskFile(userId) {
+  return getSessionPath(userId, 'tasks.json');
+}
 
-function readTasks() {
+function readTasks(userId) {
   try {
-    const raw = fs.readFileSync(TASKS_FILE, 'utf-8');
-    return JSON.parse(raw);
+    const tasks = JSON.parse(fs.readFileSync(taskFile(userId), 'utf8'));
+    return Array.isArray(tasks) ? tasks : [];
   } catch {
     return [];
   }
 }
 
-function appendTasks(newTasks, meta) {
+function appendTasks(userId, newTasks, meta) {
   if (!Array.isArray(newTasks) || newTasks.length === 0) return;
-  const tasks = readTasks();
-  const timestamp = new Date().toISOString();
+
+  const tasks = readTasks(userId);
+  const createdAt = new Date().toISOString();
   for (const item of newTasks) {
-    // Accept the old string format too, so existing callers and saved tasks
-    // remain compatible while new tasks retain meeting details.
     const task = typeof item === 'string' ? item : item?.task;
     if (typeof task !== 'string' || !task.trim()) continue;
 
@@ -30,11 +31,12 @@ function appendTasks(newTasks, meta) {
       kind: item?.kind === 'meeting' ? 'meeting' : 'action',
       scheduledFor: typeof item?.scheduledFor === 'string' ? item.scheduledFor : null,
       originalMessage: meta.originalMessage || null,
-      createdAt: timestamp,
+      createdAt,
       done: false,
     });
   }
-  fs.writeFileSync(TASKS_FILE, JSON.stringify(tasks, null, 2));
+
+  fs.writeFileSync(taskFile(userId), JSON.stringify(tasks, null, 2));
 }
 
 module.exports = { readTasks, appendTasks };

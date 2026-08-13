@@ -1,29 +1,27 @@
 const fs = require('fs');
 const path = require('path');
+const { getSessionPath } = require('./sessionStore');
 
-const STATE_FILE = path.join(__dirname, '..', 'away-state.json');
+function stateFile(userId) {
+  return getSessionPath(userId, 'away-state.json');
+}
 
-function readState() {
+function readState(userId) {
   try {
-    const raw = fs.readFileSync(STATE_FILE, 'utf-8');
-    return JSON.parse(raw);
+    return JSON.parse(fs.readFileSync(stateFile(userId), 'utf8'));
   } catch {
     return { enabled: false, updatedAt: null };
   }
 }
 
-function writeState(state) {
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-}
-
-function isEnabled() {
-  return readState().enabled === true;
-}
-
-function setEnabled(enabled) {
-  const state = { enabled, updatedAt: new Date().toISOString() };
-  writeState(state);
+function setEnabled(userId, enabled) {
+  const state = { enabled: Boolean(enabled), updatedAt: new Date().toISOString() };
+  fs.writeFileSync(stateFile(userId), JSON.stringify(state, null, 2));
   return state;
+}
+
+function isEnabled(userId) {
+  return readState(userId).enabled === true;
 }
 
 module.exports = { isEnabled, setEnabled };

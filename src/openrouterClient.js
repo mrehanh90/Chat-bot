@@ -93,9 +93,17 @@ async function callOpenRouter({
   });
 
   if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(`OpenRouter API error ${res.status}: ${errText}`);
-  }
+  const errText = await res.text().catch(() => '');
+
+  console.error(
+    `[OpenRouter] HTTP ${res.status}:`,
+    errText
+  );
+
+  throw new Error(
+    `OpenRouter API error ${res.status}: ${errText || res.statusText}`
+  );
+}
 
   return res.json();
 }

@@ -1,5 +1,37 @@
 # WhatsApp AI Assistant — OpenRouter
 
+## Multi-user sessions
+
+Each registered owner has an isolated WhatsApp session under `sessions/<userId>/`.
+That folder contains the user's Baileys credentials, away-mode state, tasks,
+contact log, and session metadata.
+
+Register and link a user account by scanning the QR code:
+
+```bash
+npm run register -- alice
+```
+
+Start all registered user sessions:
+
+```bash
+npm start
+```
+
+List registered sessions:
+
+```bash
+npm run list-sessions
+```
+
+Each owner controls only their own session by sending themselves `!away on`,
+`!away off`, `!away status`, or `!tasks` from a linked device.
+
+> **Privacy notice:** The service stores a direct contact's WhatsApp JID,
+> display name, message timestamp, and any location they explicitly share. It
+> does not collect device model or IP address. Provide an appropriate notice and
+> ensure a lawful basis before operating the service.
+
 A personal WhatsApp assistant that connects to your own WhatsApp account through
 Baileys. When Away Mode is enabled, it can generate replies, extract tasks, and
 use OpenRouter's web-search server tool for questions that require current data.
@@ -43,24 +75,24 @@ Then set:
 OPENROUTER_API_KEY=sk-or-v1-...
 OPENROUTER_MODEL=openai/gpt-oss-20b:free
 OPENROUTER_LIVE_MODEL=openai/gpt-oss-20b:free
-BOT_OWNER_NUMBER=923001234567@s.whatsapp.net
 ```
 
-Do **not** commit `.env` or `baileys_auth_info/`.
+Do **not** commit `.env` or `sessions/`.
 
 ## 3. Link WhatsApp
 
 Run:
 
 ```bash
-node index.js
+npm run register -- alice
 ```
 
 Scan the QR code from:
 
 **WhatsApp → Settings → Linked Devices → Link a Device**
 
-After linking, credentials are stored locally in `baileys_auth_info/`.
+After linking, credentials and all user-specific data are stored locally in
+`sessions/alice/`.
 
 ## 4. Enable Away Mode
 
@@ -97,7 +129,7 @@ OpenRouter structured-output model
         |                              v
         |                         grounded reply
         |
-        +---- action item --------> tasks.json + owner notification
+        +---- action item --------> sessions/<userId>/tasks.json + owner notification
 ```
 
 The model first decides whether the message needs live information. Only those
@@ -143,7 +175,7 @@ Never share:
 
 - `OPENROUTER_API_KEY`
 - the `.env` file
-- the `baileys_auth_info/` directory
+- the `sessions/` directory
 - WhatsApp session/credential JSON files
 
 If an API key was previously placed in a repository or shared archive, revoke it

@@ -6,7 +6,9 @@
   "type": "commonjs",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon --ignore baileys_auth_info --ignore tasks.json --ignore away-state.json index.js",
+    "register": "node index.js register",
+    "list-sessions": "node index.js list",
+    "dev": "nodemon --ignore sessions index.js",
     "pm2:start": "pm2 start ecosystem.config.js",
     "pm2:restart": "pm2 restart whatsapp-assistant",
     "pm2:logs": "pm2 logs whatsapp-assistant",

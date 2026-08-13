@@ -1,6 +1,7 @@
 node_modules/
 .env
 baileys_auth_info/
+sessions/
 logs/
 tasks.json
 away-state.json
