@@ -4,6 +4,8 @@ const {
   DisconnectReason,
   fetchLatestBaileysVersion,
   areJidsSameUser,
+  downloadMediaMessage,
+  jidNormalizedUser,
 } = require('@whiskeysockets/baileys');
 const qrcode = require('qrcode-terminal');
 const pino = require('pino');
@@ -13,16 +15,20 @@ const config = require('./src/config');
 const awayMode = require('./src/awayMode');
 const openrouterClient = require('./src/openrouterClient');
 const taskStore = require('./src/taskStore');
+const { formatTimestamp } = require('./src/time');
 const {
   assertUserId,
   getSessionPath,
   readSessionMeta,
   writeSessionMeta,
   listUserIds,
+} = require('./src/sessionStore');
+const {
   appendContactLog,
   readLastReplyTimestamps,
   writeLastReplyTimestamp,
-} = require('./src/sessionStore');
+  rememberProcessedMessage,
+} = require('./src/dataStore');
 
 const logger = pino({ level: 'info' });
 const MAX_PROCESSED_IDS = 2000;
@@ -49,7 +55,10 @@ class SessionManager {
       running: false,
       starting: false,
       manuallyStopped: false,
+      reconnectAttempt: 0,
+      reconnectTimer: null,
       processedMessageIds: new Set(),
+      ownerAlertIds: new Map(),
       lastReplyAtByChat: new Map(Object.entries(readLastReplyTimestamps(userId))),
     };
     session.manuallyStopped = false;
@@ -66,7 +75,8 @@ class SessionManager {
       session.starting = false;
 
       sock.ev.on('creds.update', saveCreds);
-      sock.ev.on('connection.update', (update) => this.handleConnectionUpdate(session, state, update));
+      sock.ev.on('connection.update', (update) => this.handleConnectionUpdate(session, state, sock, update));
+      sock.ev.on('messages.update', (updates) => this.handleMessageUpdates(session, updates));
       sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
         for (const msg of messages) {
@@ -93,6 +103,7 @@ class SessionManager {
     if (!session) return false;
     session.manuallyStopped = true;
     session.running = false;
+    clearTimeout(session.reconnectTimer);
     try {
       session.sock?.end?.(undefined);
     } catch (err) {
@@ -107,9 +118,12 @@ class SessionManager {
     await Promise.all([...this.sessions.keys()].map((userId) => this.stop(userId)));
   }
 
-  handleConnectionUpdate(session, state, update) {
+  handleConnectionUpdate(session, state, sock, update) {
     const { connection, lastDisconnect, qr } = update;
     const { userId } = session;
+
+    // Ignore events emitted by a socket that was replaced during reconnect.
+    if (session.sock !== sock) return;
 
     if (qr) {
       console.log(`\n[${userId}] Scan this QR code in WhatsApp → Linked Devices:\n`);
@@ -117,7 +131,10 @@ class SessionManager {
     }
 
     if (connection === 'open') {
-      const ownerJid = state.creds.me?.lid || state.creds.me?.id || null;
+      session.reconnectAttempt = 0;
+      clearTimeout(session.reconnectTimer);
+      session.reconnectTimer = null;
+      const ownerJid = jidNormalizedUser(state.creds.me?.lid || state.creds.me?.id);
       writeSessionMeta(userId, { ownerJid, status: 'connected', connectedAt: new Date().toISOString() });
       logger.info({ userId, ownerJid }, 'WhatsApp user session connected');
       return;
@@ -137,10 +154,13 @@ class SessionManager {
     }
 
     if (!session.manuallyStopped) {
-      logger.warn({ userId, statusCode }, 'User session disconnected; reconnecting this user only');
-      setTimeout(() => this.start(userId).catch((err) => {
+      const delayMs = Math.min(5000 * (2 ** session.reconnectAttempt), 60000);
+      session.reconnectAttempt += 1;
+      logger.warn({ userId, statusCode, retryInMs: delayMs }, 'User session disconnected; reconnecting this user only');
+      clearTimeout(session.reconnectTimer);
+      session.reconnectTimer = setTimeout(() => this.start(userId).catch((err) => {
         logger.error({ err, userId }, 'User session reconnect failed');
-      }), 5000);
+      }), delayMs);
     }
   }
 
@@ -151,9 +171,26 @@ class SessionManager {
     }
   }
 
+  handleMessageUpdates(session, updates) {
+    for (const update of updates) {
+      const id = update.key?.id;
+      if (!id || !session.ownerAlertIds.has(id)) continue;
+      const alert = session.ownerAlertIds.get(id);
+      logger.info({ userId: session.userId, messageId: id, status: update.update?.status, ...alert }, 'Owner alert delivery status updated');
+      if (update.update?.status !== undefined) session.ownerAlertIds.delete(id);
+    }
+  }
+
+  async sendOwnerAlert(session, ownerJid, text, metadata = {}) {
+    const sent = await session.sock.sendMessage(ownerJid, { text, linkPreview: false });
+    if (sent?.key?.id) session.ownerAlertIds.set(sent.key.id, metadata);
+    logger.info({ userId: session.userId, ownerJid, messageId: sent?.key?.id, ...metadata }, 'Owner alert submitted to WhatsApp');
+    return sent;
+  }
+
   async isOwnerSelfChat(session, chatJid) {
     if (!chatJid) return false;
-    const ownerJid = readSessionMeta(session.userId).ownerJid;
+    const ownerJid = getOwnerJid(session.userId);
     if (!ownerJid) return false;
     if (areJidsSameUser(chatJid, ownerJid)) return true;
 
@@ -208,13 +245,51 @@ class SessionManager {
     });
   }
 
+  async forwardTimeOrLocation(session, msg, chatJid, text, source = 'Message') {
+    const ownerJid = getOwnerJid(session.userId);
+    if (!ownerJid) return;
+
+    const location = msg.message?.locationMessage;
+    const hasTimeReference = containsSchedulingTimeReference(text);
+    const isMeetingRequest = containsMeetingReference(text);
+    if (!location && !hasTimeReference && !isMeetingRequest) return;
+
+    const sender = msg.pushName || chatJid;
+    const timestamp = new Date(Number(msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000).toISOString();
+    const latitude = location?.degreesLatitude;
+    const longitude = location?.degreesLongitude;
+    const mapLink = Number.isFinite(latitude) && Number.isFinite(longitude)
+      ? `https://www.google.com/maps?q=${latitude},${longitude}`
+      : null;
+    const venue = location?.name || location?.address || extractVenue(text) || 'Not provided';
+    const place = mapLink || venue;
+    const time = extractTimeReference(text) || 'Not specified';
+    const task = isMeetingRequest
+      ? 'Review and confirm the meeting request.'
+      : 'Review the time/date mentioned in this message.';
+
+    await this.sendOwnerAlert(session, ownerJid, [
+        '📅 Meeting / Time Alert',
+        `Place: ${place}`,
+        `Time: ${time}`,
+        `Venue: ${venue}`,
+        `Sender name: ${sender}`,
+        `Task: ${task}`,
+        `Received: ${formatTimestamp(timestamp, config.timeZone)} (${config.timeZone})`,
+        '',
+        `Original ${source}:`,
+        text || '(A location was shared without text.)',
+      ].join('\n'), { sender, hasTimeReference, isMeetingRequest, kind: 'meeting_time' });
+  }
+
   async handleIncoming(session, msg) {
     const id = msg.key?.id;
-    if (!id || session.processedMessageIds.has(id)) return;
+    if (!id || session.processedMessageIds.has(id) || !rememberProcessedMessage(session.userId, id)) return;
     this.rememberMessageId(session, id);
 
     const chatJid = msg.key.remoteJid;
-    const text = extractText(msg.message);
+    let text = extractText(msg.message);
+    let source = 'Message';
     const { userId, sock } = session;
 
     logger.info({ userId, chatJid, fromMe: msg.key.fromMe, text: text.slice(0, 80) }, 'Incoming message event');
@@ -228,9 +303,22 @@ class SessionManager {
 
     if (!chatJid || chatJid === 'status@broadcast') return;
 
+    if (!text && msg.message?.audioMessage?.ptt) {
+      try {
+        const audioBuffer = await downloadMediaMessage(msg, 'buffer', {}, { logger });
+        text = await openrouterClient.transcribeVoiceNote(audioBuffer, msg.message.audioMessage.mimetype);
+        source = 'Voice-note transcript';
+        logger.info({ userId, chatJid, transcript: text.slice(0, 80) }, 'Voice note transcribed');
+      } catch (err) {
+        logger.error({ err, userId, chatJid }, 'Voice-note transcription failed');
+        return;
+      }
+    }
+
     // Privacy notice: this is intentionally limited to WhatsApp JID, push name,
     // message timestamp, and any location the contact explicitly shared.
     this.logContactMessage(session, msg, msg.key.participant || chatJid);
+    await this.forwardTimeOrLocation(session, msg, chatJid, text, source);
 
     // Contacts are still logged above, but group auto-replies remain opt-in.
     if (config.ignoreGroups && chatJid.endsWith('@g.us')) return;
@@ -247,7 +335,21 @@ class SessionManager {
     await sock.sendPresenceUpdate('composing', chatJid);
     try {
       const senderName = msg.pushName || undefined;
-      const { reply, tasks } = await openrouterClient.processMessage(text.slice(0, config.maxInputChars), senderName);
+      const quickReply = getQuickReply(text);
+      let result = quickReply ? { reply: quickReply, tasks: [] } : null;
+      if (!result) {
+        try {
+          result = await openrouterClient.processMessage(text.slice(0, config.maxInputChars), senderName);
+        } catch (err) {
+          logger.error({ err, userId, chatJid }, 'AI reply failed; using away-message fallback');
+          result = {
+            reply: "Thanks for your message. The owner is away right now and will get back to you soon.",
+            tasks: [],
+          };
+        }
+      }
+
+      const { reply, tasks } = result;
       if (reply) {
         await sock.sendMessage(chatJid, { text: reply, linkPreview: false });
         const repliedAt = Date.now();
@@ -257,15 +359,16 @@ class SessionManager {
 
       if (tasks.length > 0) {
         taskStore.appendTasks(userId, tasks, { senderJid: chatJid, senderName, chatJid, originalMessage: text });
-        const ownerJid = readSessionMeta(userId).ownerJid;
+        const ownerJid = getOwnerJid(userId);
         if (!ownerJid) return;
 
         const scheduledTasks = tasks.filter((task) => task.kind === 'meeting' || task.scheduledFor);
+        // Time and meeting messages were already forwarded above in a structured
+        // format. Persist the extracted task, but avoid sending the owner twice.
+        if (scheduledTasks.length > 0) return;
         const taskSummary = tasks.map((task) => `- ${task.task}${task.scheduledFor ? ` — ${task.scheduledFor}` : ''}`).join('\n');
         await sock.sendMessage(ownerJid, {
-          text: scheduledTasks.length
-            ? `📅 Scheduled item from ${senderName || chatJid}:\n${taskSummary}\n\nOriginal message:\n${text}`
-            : `🆕 New task(s) from ${senderName || chatJid}:\n${taskSummary}`,
+          text: `🆕 New task(s) from ${senderName || chatJid}:\n${taskSummary}`,
           linkPreview: false,
         });
       }
@@ -280,6 +383,65 @@ function extractText(message) {
   return (message.conversation || message.extendedTextMessage?.text || message.imageMessage?.caption || message.videoMessage?.caption || '').trim();
 }
 
+function getOwnerJid(userId) {
+  return jidNormalizedUser(readSessionMeta(userId).ownerJid);
+}
+
+function containsTimeReference(text) {
+  if (!text) return false;
+  const explicitTimeOrDate = /\b(?:\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?|am|pm)|\d{1,2}\s*o['’]?clock|\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?|monday|tuesday|wednesday|thursday|friday|saturday|sunday|noon|midnight|baje|baja|bjy|bje)\b/i;
+  if (explicitTimeOrDate.test(text)) return true;
+
+  // “Today” alone is common in live questions, e.g. today's weather. It is
+  // treated as scheduling only when the message also describes an action.
+  const relativeTime = /\b(?:today|tomorrow|tonight|this\s+(?:morning|afternoon|evening|weekend)|next\s+week|morning|afternoon|evening)\b/i;
+  const schedulingContext = /\b(?:meet(?:ing)?|appointment|schedule|call|visit|come|deadline|remind|task|mulaqat)\b/i;
+  return relativeTime.test(text) && schedulingContext.test(text);
+  return /\b(?:\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?|am|pm)|\d{1,2}\s*o['’]?clock|\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?|today|tomorrow|tonight|this\s+(?:morning|afternoon|evening|weekend)|next\s+(?:week|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|monday|tuesday|wednesday|thursday|friday|saturday|sunday|morning|afternoon|evening|noon|midnight|baje|baja|bjy|bje)\b/i.test(text);
+}
+
+function containsMeetingReference(text) {
+  return /\b(?:meeting|meet|appointment|schedule|call|mulaqat|meeting\s+hai)\b/i.test(text || '');
+}
+
+function containsSchedulingTimeReference(text) {
+  if (!text) return false;
+  const explicitTimeOrDate = /\b(?:\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?|am|pm)|\d{1,2}\s*o['’]?clock|\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?|monday|tuesday|wednesday|thursday|friday|saturday|sunday|noon|midnight|baje|baja|bjy|bje)\b/i;
+  if (explicitTimeOrDate.test(text)) return true;
+  const relativeTime = /\b(?:today|tomorrow|tonight|this\s+(?:morning|afternoon|evening|weekend)|next\s+week|morning|afternoon|evening)\b/i;
+  const schedulingContext = /\b(?:meet(?:ing)?|appointment|schedule|call|visit|come|deadline|remind|task|mulaqat)\b/i;
+  return relativeTime.test(text) && schedulingContext.test(text);
+}
+
+function extractTimeReference(text) {
+  return text?.match(/\b(?:\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?|am|pm)|\d{1,2}\s*o['’]?clock|\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?|today|tomorrow|tonight|this\s+(?:morning|afternoon|evening|weekend)|next\s+(?:week|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|monday|tuesday|wednesday|thursday|friday|saturday|sunday|morning|afternoon|evening|noon|midnight|baje|baja|bjy|bje)\b/i)?.[0] || '';
+}
+
+function extractVenue(text) {
+  const explicit = text?.match(/\b(?:venue|location)\s*[:=-]?\s*([^,.!?\n]{2,80})/i);
+  const meetingAt = text?.match(/\b(?:meet(?:ing)?|appointment|call)\s+at\s+([^,.!?\n]{2,80})/i);
+  const venue = explicit?.[1] || meetingAt?.[1] || '';
+  return venue.replace(/\s+(?:at|on)\s+(?:\d|today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday).*$/i, '').trim();
+}
+
+function getQuickReply(text) {
+  const normalized = text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (/\b(?:ass+alamo?\s*ala?ikum|as+alamo?\s*ala?ikum|salaam|salam)\b/.test(normalized)) {
+    return 'Wa Alaikum Assalam!';
+  }
+
+  if (/\b(?:how are you|how r u|kaisa(?: ho| haan| hain)?|kaise(?: ho| haan| hain)?|kesa(?: ho| haan| hain)?|kese(?: ho| haan| hain)?|kasa(?: ho| haan| hain)?|kya haal|kia haal)\b/.test(normalized)) {
+    return 'Alhamdulillah, main theek hoon. Aap sunayein?';
+  }
+
+  return '';
+}
+
 function printUsage() {
   console.log('Usage: node index.js [register <userId> | start <userId> | stop <userId> | list]');
 }
@@ -288,7 +450,7 @@ async function main() {
   const manager = new SessionManager();
   const [command, userId] = process.argv.slice(2);
 
-  console.warn('Privacy notice: this service stores each contact\'s WhatsApp JID, display name, message timestamp, and any location they explicitly share. Ensure you have an appropriate notice and lawful basis before operating it.');
+  console.warn('Privacy notice: this service stores each contact\'s WhatsApp JID, display name, message timestamp, and any location they explicitly share. Voice notes are sent to the configured transcription provider. Ensure you have an appropriate notice and lawful basis before operating it.');
 
   if (command === 'register') {
     if (!userId) return printUsage();

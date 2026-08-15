@@ -46,34 +46,6 @@ function listUserIds() {
     .map((entry) => entry.name);
 }
 
-function appendContactLog(userId, entry) {
-  const file = getSessionPath(userId, 'contacts.json');
-  let contacts = [];
-  try {
-    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-    contacts = Array.isArray(parsed) ? parsed : [];
-  } catch {
-    // First entry for this user.
-  }
-  contacts.push(entry);
-  fs.writeFileSync(file, JSON.stringify(contacts, null, 2));
-}
-
-function readLastReplyTimestamps(userId) {
-  try {
-    const timestamps = JSON.parse(fs.readFileSync(getSessionPath(userId, 'last-replies.json'), 'utf8'));
-    return timestamps && typeof timestamps === 'object' ? timestamps : {};
-  } catch {
-    return {};
-  }
-}
-
-function writeLastReplyTimestamp(userId, chatJid, timestamp) {
-  const timestamps = readLastReplyTimestamps(userId);
-  timestamps[chatJid] = timestamp;
-  fs.writeFileSync(getSessionPath(userId, 'last-replies.json'), JSON.stringify(timestamps, null, 2));
-}
-
 module.exports = {
   SESSIONS_ROOT,
   assertUserId,
@@ -82,7 +54,4 @@ module.exports = {
   readSessionMeta,
   writeSessionMeta,
   listUserIds,
-  appendContactLog,
-  readLastReplyTimestamps,
-  writeLastReplyTimestamp,
 };

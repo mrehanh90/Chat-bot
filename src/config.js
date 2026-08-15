@@ -11,6 +11,15 @@ function required(name) {
   return value.trim();
 }
 
+function timeZone(value) {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value }).format();
+    return value;
+  } catch {
+    throw new Error(`Invalid APP_TIME_ZONE: ${value}`);
+  }
+}
+
 module.exports = {
   // OpenRouter
   openRouterApiKey: required('OPENROUTER_API_KEY'),
@@ -21,8 +30,28 @@ module.exports = {
 
   openRouterLiveModel:
     process.env.OPENROUTER_LIVE_MODEL?.trim() ||
-    process.env.OPENROUTER_MODEL?.trim() ||
-    'openai/gpt-oss-20b:free',
+    'openrouter/auto',
+
+  openRouterFallbackModels:
+    (process.env.OPENROUTER_FALLBACK_MODELS || '')
+      .split(',')
+      .map((model) => model.trim())
+      .filter(Boolean),
+
+  requestTimeoutMs:
+    Math.max(1000, parseInt(process.env.OPENROUTER_REQUEST_TIMEOUT_MS || '30000', 10)),
+
+  maxRetries:
+    Math.max(0, parseInt(process.env.OPENROUTER_MAX_RETRIES || '2', 10)),
+
+  webSearchEngine:
+    process.env.OPENROUTER_WEB_SEARCH_ENGINE?.trim() || 'exa',
+
+  // Audio transcription model for WhatsApp voice notes. This model is used only
+  // when a contact sends a push-to-talk voice note.
+  openRouterTranscriptionModel:
+    process.env.OPENROUTER_TRANSCRIPTION_MODEL?.trim() ||
+    'openai/whisper-large-v3',
 
   // Optional OpenRouter metadata
   openRouterSiteUrl:
@@ -41,4 +70,6 @@ module.exports = {
 
   minReplyIntervalMs:
     parseInt(process.env.MIN_REPLY_INTERVAL_MS || '15000', 10),
+
+  timeZone: timeZone(process.env.APP_TIME_ZONE?.trim() || 'Asia/Karachi'),
 };

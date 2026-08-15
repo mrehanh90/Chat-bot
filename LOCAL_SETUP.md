@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Node.js 20+
+- Node.js 22.5+
 - A WhatsApp account to link through Baileys
 - An OpenRouter API key
 
@@ -19,16 +19,19 @@ Copy `.env.example` to `.env` and set:
 ```env
 OPENROUTER_API_KEY=sk-or-v1-...
 OPENROUTER_MODEL=openai/gpt-oss-20b:free
-OPENROUTER_LIVE_MODEL=openai/gpt-oss-20b:free
-BOT_OWNER_NUMBER=923001234567@s.whatsapp.net
+OPENROUTER_LIVE_MODEL=openrouter/auto
+OPENROUTER_FALLBACK_MODELS=
+OPENROUTER_REQUEST_TIMEOUT_MS=30000
+OPENROUTER_MAX_RETRIES=2
 ```
 
-Replace `BOT_OWNER_NUMBER` with your own WhatsApp JID.
+Live web search and voice transcription need an OpenRouter balance; free shared
+models can be rate-limited.
 
 ## Start
 
 ```bash
-node index.js
+npm run register -- your-user-id
 ```
 
 Scan the displayed QR code from WhatsApp:
@@ -56,7 +59,7 @@ If you see `401`, verify `OPENROUTER_API_KEY`.
 If you see model errors, try another currently available OpenRouter model by
 changing `OPENROUTER_MODEL` in `.env`.
 
-If WhatsApp logs out, remove the local `baileys_auth_info/` directory and link
-the device again.
+If WhatsApp logs out, remove only
+`sessions/<your-user-id>/baileys_auth_info/` and run the register command again.
 
-Never commit `.env` or `baileys_auth_info/`.
+Never commit `.env` or `sessions/`.

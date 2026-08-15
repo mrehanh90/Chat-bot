@@ -1,6 +1,8 @@
 const config = require('./config');
+const { currentZonedIso } = require('./time');
 
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
+const OPENROUTER_TRANSCRIPTION_URL = 'https://openrouter.ai/api/v1/audio/transcriptions';
 
 const SYSTEM_PROMPT = `You are a helpful WhatsApp assistant replying on behalf of the phone's owner,
 who is currently away.
@@ -36,14 +38,22 @@ No markdown fences or extra commentary.`;
 const LIVE_ANSWER_PROMPT = `Answer the user's question using current, web-grounded information.
 Be concise and accurate. Include essential units, date, or location when relevant.
 Never invent facts. Do not mention being an AI or the owner's away status.
+Only state a price, timing, or other exact value when it appears in the search
+results. If the results do not verify the requested value, say that clearly and
+give the best available official source instead. Never write an empty claim such
+as "the rate is:".
 When web results are available, use them as evidence and include short source links in
 markdown when useful. Return plain text only.`;
 
-function getPakistanTimestamp() {
-  // Pakistan Standard Time is UTC+05:00 year-round.
-  return new Date(Date.now() + (5 * 60 * 60 * 1000))
-    .toISOString()
-    .replace('Z', '+05:00');
+function getOpenRouterHeaders() {
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${config.openRouterApiKey}`,
+  };
+
+  if (config.openRouterSiteUrl) headers['HTTP-Referer'] = config.openRouterSiteUrl;
+  if (config.openRouterSiteName) headers['X-Title'] = config.openRouterSiteName;
+  return headers;
 }
 
 async function callOpenRouter({
@@ -56,58 +66,96 @@ async function callOpenRouter({
   tools,
   extraBody = {},
 }) {
-  const body = {
-    model,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt },
-    ],
-    temperature,
-    max_tokens: maxTokens,
-    ...extraBody,
-  };
+  const models = [...new Set([model, ...config.openRouterFallbackModels].filter(Boolean))];
+  let lastError;
 
-  if (jsonMode) {
-    // OpenRouter exposes an OpenAI-compatible response_format.
-    // The selected free model supports structured outputs.
-    body.response_format = { type: 'json_object' };
+  for (const candidate of models) {
+    for (let attempt = 0; attempt <= config.maxRetries; attempt += 1) {
+      const body = {
+        model: candidate,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature,
+        max_tokens: maxTokens,
+        ...extraBody,
+      };
+      if (jsonMode) body.response_format = { type: 'json_object' };
+      if (tools?.length) body.tools = tools;
+
+      try {
+        const data = await fetchJsonWithTimeout(OPENROUTER_API_URL, {
+          method: 'POST',
+          headers: getOpenRouterHeaders(),
+          body: JSON.stringify(body),
+        });
+        return data;
+      } catch (err) {
+        lastError = err;
+        if (!isRetriable(err) || attempt === config.maxRetries) break;
+        const delayMs = Math.min(err.retryAfterMs || (1000 * (2 ** attempt)), 60000);
+        console.warn(`[OpenRouter] ${err.message}; retrying ${candidate} in ${delayMs}ms`);
+        await sleep(delayMs);
+      }
+    }
   }
 
-  if (tools?.length) {
-    body.tools = tools;
+  throw lastError || new Error('OpenRouter request failed');
+}
+
+async function fetchJsonWithTimeout(url, options) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), config.requestTimeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    if (res.ok) return res.json();
+    const errText = await res.text().catch(() => '');
+    const error = new Error(`OpenRouter API error ${res.status}: ${errText || res.statusText}`);
+    error.status = res.status;
+    const retryAfter = Number(res.headers.get('retry-after'));
+    error.retryAfterMs = Number.isFinite(retryAfter) ? retryAfter * 1000 : 0;
+    throw error;
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      const timeoutError = new Error(`OpenRouter request timed out after ${config.requestTimeoutMs}ms`);
+      timeoutError.status = 408;
+      throw timeoutError;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isRetriable(error) {
+  return !error.status || error.status === 408 || error.status === 409 || error.status === 429 || error.status >= 500;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function transcribeVoiceNote(audioBuffer, mimeType = 'audio/ogg') {
+  if (!Buffer.isBuffer(audioBuffer) || !audioBuffer.length) {
+    throw new Error('Voice note did not contain audio data');
   }
 
-  const headers = {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${config.openRouterApiKey}`,
-  };
-
-  // Optional headers recommended by OpenRouter for attribution/rankings.
-  if (config.openRouterSiteUrl) headers['HTTP-Referer'] = config.openRouterSiteUrl;
-  if (config.openRouterSiteName) headers['X-Title'] = config.openRouterSiteName;
-
-  const res = await fetch(OPENROUTER_API_URL, {
+  const format = mimeType.toLowerCase().includes('ogg') ? 'ogg' : 'wav';
+  const data = await fetchJsonWithTimeout(OPENROUTER_TRANSCRIPTION_URL, {
     method: 'POST',
-    headers,
-    body: JSON.stringify(body),
+    headers: getOpenRouterHeaders(),
+    body: JSON.stringify({
+      model: config.openRouterTranscriptionModel,
+      input_audio: {
+        data: audioBuffer.toString('base64'),
+        format,
+      },
+    }),
   });
 
-  if (!res.ok) {
-  const errText = await res.text().catch(() => '');
-
-  console.error(
-    `[OpenRouter] HTTP ${res.status}:`,
-    errText
-  );
-
-  throw new Error(
-    `OpenRouter API error ${res.status}: ${errText || res.statusText}`
-  );
+  return typeof data.text === 'string' ? data.text.trim() : '';
 }
-
-  return res.json();
-}
-
 function parseStructuredResponse(raw) {
   try {
     return JSON.parse(raw || '{}');
@@ -163,28 +211,22 @@ function addSources(answer, message) {
 }
 
 async function getLiveAnswer(messageText) {
+  console.info('[live-search] Requesting web-grounded answer');
   const data = await callOpenRouter({
     model: config.openRouterLiveModel,
     systemPrompt: LIVE_ANSWER_PROMPT,
-    userPrompt: `Current date and time in Asia/Karachi: ${getPakistanTimestamp()}
+    userPrompt: `Current date and time in ${config.timeZone}: ${currentZonedIso(config.timeZone)}
 User question: ${messageText}`,
     temperature: 0.2,
     maxTokens: 700,
-    tools: [
-      {
-        type: 'openrouter:web_search',
-        parameters: {
-          engine: 'auto',
-          max_results: 3,
-          max_total_results: 5,
-          max_characters: 3000,
-        },
-      },
-    ],
+    extraBody: {
+      plugins: [{ id: 'web', engine: config.webSearchEngine, max_results: 3 }],
+    },
   });
 
   const message = data.choices?.[0]?.message;
   const answer = (message?.content || '').trim();
+  console.info(`[live-search] ${answer ? 'Answer received' : 'No answer returned'}`);
   return answer ? addSources(answer, message) : '';
 }
 
@@ -194,10 +236,18 @@ User question: ${messageText}`,
  * @returns {Promise<{reply: string, tasks: Array<{task: string, kind: string, scheduledFor: string | null}>}>}
  */
 async function processMessage(messageText, senderName) {
+  if (isLikelyLiveQuestion(messageText)) {
+    const reply = await getLiveAnswer(messageText);
+    return {
+      reply: reply || "I couldn't find a verified current answer for that right now. Please check the official website or try again shortly.",
+      tasks: [],
+    };
+  }
+
   const data = await callOpenRouter({
     model: config.openRouterModel,
     systemPrompt: SYSTEM_PROMPT,
-    userPrompt: `Current date and time in Asia/Karachi: ${getPakistanTimestamp()}
+    userPrompt: `Current date and time in ${config.timeZone}: ${currentZonedIso(config.timeZone)}
 Sender: ${senderName || 'Unknown'}
 Message: ${messageText}`,
     temperature: 0.4,
@@ -225,4 +275,12 @@ Message: ${messageText}`,
   };
 }
 
-module.exports = { processMessage };
+function isLikelyLiveQuestion(text) {
+  const normalized = (text || '').toLowerCase();
+  const currentSignal = /\b(?:today|latest|current|right now|live|now|aaj|aj)\b/.test(normalized);
+  const liveTopic = /\b(?:weather|temperature|forecast|gold|rate|price|exchange|currency|dollar|rupee|news|score|match|schedule|availability|stock|market|bank|timing|timings|hours)\b/.test(normalized);
+  const businessHoursQuestion = /\b(?:bank|branch|office|shop|market)\b.*\b(?:time|timing|timings|hours|open|close|closing)\b|\b(?:time|timing|timings|hours|open|close|closing)\b.*\b(?:bank|branch|office|shop|market)\b/.test(normalized);
+  return (currentSignal && liveTopic) || businessHoursQuestion;
+}
+
+module.exports = { processMessage, transcribeVoiceNote };

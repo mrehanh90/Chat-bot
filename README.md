@@ -1,182 +1,209 @@
-# WhatsApp AI Assistant — OpenRouter
+# WhatsApp AI Assistant
 
-## Multi-user sessions
+A multi-session WhatsApp away-mode assistant built with Baileys and OpenRouter.
+Each registered owner has an isolated WhatsApp session, settings, task list, and
+local data store.
 
-Each registered owner has an isolated WhatsApp session under `sessions/<userId>/`.
-That folder contains the user's Baileys credentials, away-mode state, tasks,
-contact log, and session metadata.
+> Baileys is an unofficial WhatsApp Web client. Automated use may violate
+> WhatsApp terms or cause account restrictions. Use it only with an account you
+> own and keep rate limits enabled.
 
-Register and link a user account by scanning the QR code:
+## Features
 
-```bash
-npm run register -- alice
+- Independent WhatsApp sessions under `sessions/<userId>/`.
+- Away-mode replies controlled from the owner's self-chat.
+- Direct replies for common greetings, Salaam, and "how are you / kaisa ho".
+- General and personal-topic replies while Away Mode is enabled.
+- Live web-grounded answers for common current questions: weather, gold rates,
+  news, exchange rates, scores, market data, and business hours.
+- Voice-note transcription, then the same reply/task/time workflow as text.
+- Meeting, date/time, and explicitly shared WhatsApp-location alerts sent to
+  the owner's self-chat in a structured format.
+- SQLite storage for contacts, tasks, reply timestamps, and persistent message
+  deduplication.
+- Per-session reconnect backoff and failure isolation.
+
+## Requirements
+
+- Node.js 22.5 or later
+- A WhatsApp account for each owner
+- An OpenRouter API key
+- OpenRouter credit for dependable live web search and voice transcription
+
+## Install
+
+```powershell
+cd D:\Projects\whatsapp-assistant
+npm.cmd install
 ```
 
-Start all registered user sessions:
+## Configure
 
-```bash
+Copy the template and add your OpenRouter key:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Important `.env` settings:
+
+```env
+OPENROUTER_API_KEY=your_openrouter_api_key_here
+
+# General replies and task extraction. Free models can be rate-limited.
+OPENROUTER_MODEL=openai/gpt-oss-20b:free
+
+# Used for current/live questions. Requires OpenRouter balance.
+OPENROUTER_LIVE_MODEL=openrouter/auto
+OPENROUTER_FALLBACK_MODELS=
+OPENROUTER_WEB_SEARCH_ENGINE=exa
+
+# Request reliability.
+OPENROUTER_REQUEST_TIMEOUT_MS=30000
+OPENROUTER_MAX_RETRIES=2
+
+# Voice notes. This model may have usage charges.
+OPENROUTER_TRANSCRIPTION_MODEL=openai/whisper-large-v3
+
+# Local timezone used in meeting alerts and AI scheduling context.
+APP_TIME_ZONE=Asia/Karachi
+
+IGNORE_GROUPS=true
+MAX_INPUT_CHARS=2000
+MIN_REPLY_INTERVAL_MS=15000
+```
+
+Do not commit `.env` or `sessions/`.
+
+## Register and link WhatsApp
+
+Create a session and show its QR code:
+
+```powershell
+npm run register -- rehan
+```
+
+Scan the QR code in WhatsApp:
+
+`Settings -> Linked Devices -> Link a Device`
+
+Start every registered session later with:
+
+```powershell
 npm start
 ```
 
-List registered sessions:
+List sessions:
 
-```bash
+```powershell
 npm run list-sessions
 ```
 
-Each owner controls only their own session by sending themselves `!away on`,
-`!away off`, `!away status`, or `!tasks` from a linked device.
+To relink one owner with a new QR code, stop the bot and remove only that
+owner's authentication folder:
 
-> **Privacy notice:** The service stores a direct contact's WhatsApp JID,
-> display name, message timestamp, and any location they explicitly share. It
-> does not collect device model or IP address. Provide an appropriate notice and
-> ensure a lawful basis before operating the service.
-
-A personal WhatsApp assistant that connects to your own WhatsApp account through
-Baileys. When Away Mode is enabled, it can generate replies, extract tasks, and
-use OpenRouter's web-search server tool for questions that require current data.
-
-> **Important:** Baileys is an unofficial WhatsApp Web client. Automated use can
-> violate WhatsApp's terms and may result in rate limits or account restrictions.
-> Use this only for a personal account and keep the existing flood guard/group
-> protections enabled.
-
-## What changed from the Groq version
-
-- Replaced the Groq API with OpenRouter's OpenAI-compatible Chat Completions API.
-- Default model: `openai/gpt-oss-20b:free`.
-- Structured JSON output is still used for reply + task extraction.
-- Live/current questions now use OpenRouter's `openrouter:web_search` server tool.
-- Removed the old Groq-specific compound-search code.
-- **The web-search part is not necessarily free**: OpenRouter currently charges
-  for server-side web search depending on the search engine/provider, even when
-  the selected LLM model is free. The free model itself has zero token pricing.
-  See OpenRouter's current pricing/docs before enabling frequent live searches.
-
-## 1. Install
-
-```bash
-npm install
+```powershell
+Ctrl+C
+Remove-Item -Recurse -Force .\sessions\rehan\baileys_auth_info
+npm run register -- rehan
 ```
 
-Node.js 20+ is recommended/required by this project.
+## Owner commands
 
-## 2. Configure `.env`
-
-Copy the example:
-
-```bash
-cp .env.example .env
-```
-
-Then set:
-
-```env
-OPENROUTER_API_KEY=sk-or-v1-...
-OPENROUTER_MODEL=openai/gpt-oss-20b:free
-OPENROUTER_LIVE_MODEL=openai/gpt-oss-20b:free
-```
-
-Do **not** commit `.env` or `sessions/`.
-
-## 3. Link WhatsApp
-
-Run:
-
-```bash
-npm run register -- alice
-```
-
-Scan the QR code from:
-
-**WhatsApp → Settings → Linked Devices → Link a Device**
-
-After linking, credentials and all user-specific data are stored locally in
-`sessions/alice/`.
-
-## 4. Enable Away Mode
-
-From your own WhatsApp self-chat:
+Send these from the owner's own WhatsApp self-chat:
 
 ```text
 !away on
-```
-
-Other commands:
-
-```text
 !away off
 !away status
 !tasks
 ```
 
-## 5. How the AI flow works
+Normal AI replies require Away Mode to be on. Meeting/time/location alerts are
+forwarded to the owner self-chat even when Away Mode is off.
+
+## Message behavior
+
+| Incoming message | Bot behavior |
+| --- | --- |
+| `AssalamoAlaikum` | Replies `Wa Alaikum Assalam!` |
+| `Kaisa ho?` / `How are you?` | Replies `Alhamdulillah, main theek hoon. Aap sunayein?` |
+| General or personal topic | Gives a concise reply while Away Mode is on |
+| Current weather, gold rate, news, exchange rate, score | Uses live web-grounded search |
+| Bank hours/timings | Uses live web-grounded search |
+| Meeting, date, time, or shared location | Sends the owner a structured alert and stores AI-extracted tasks when available |
+| WhatsApp voice note | Transcribes it, then handles it like a text message |
+
+The flood guard allows one AI reply per chat every `MIN_REPLY_INTERVAL_MS`
+(15 seconds by default). This is about four replies per minute for one contact.
+
+## Meeting and location alert format
 
 ```text
-Incoming WhatsApp message
-        |
-        v
-Away Mode enabled?
-        |
-       yes
-        v
-OpenRouter structured-output model
-        |
-        +---- normal question ----> reply
-        |
-        +---- current/latest -----> OpenRouter web_search
-        |                              |
-        |                              v
-        |                         grounded reply
-        |
-        +---- action item --------> sessions/<userId>/tasks.json + owner notification
+Meeting / Time Alert
+Place: ...
+Time: ...
+Venue: ...
+Sender name: ...
+Task: ...
+Received: ... (Asia/Karachi)
+
+Original Message:
+...
 ```
 
-The model first decides whether the message needs live information. Only those
-messages invoke the web-search tool.
+## Local data and privacy
 
-## 6. Free-model note
+Per-user data is stored in:
 
-OpenRouter currently lists `openai/gpt-oss-20b:free` as a free model and documents
-that it supports structured outputs and tool use. Free-model availability and
-rate limits can change, so you can switch `OPENROUTER_MODEL` without changing
-the application code.
-
-OpenRouter's `openrouter/free` router is another option if you want automatic
-selection among currently available free models:
-
-```env
-OPENROUTER_MODEL=openrouter/free
+```text
+sessions/<userId>/assistant.sqlite
 ```
 
-For this project, the pinned `openai/gpt-oss-20b:free` default is preferable
-because it makes behavior more predictable.
+The database stores the sender's WhatsApp JID, display name, message timestamp,
+tasks, reply timestamps, and latitude/longitude only when the sender explicitly
+shares a WhatsApp location. It does not collect device model or IP address.
 
-## 7. Running 24/7 with PM2
+Voice-note audio is sent to the configured transcription provider. Provide an
+appropriate privacy notice and make sure you have a lawful basis before using
+this service.
 
-```bash
-pm2 start ecosystem.config.js
-pm2 save
-pm2 startup
+## Live-search and voice-note troubleshooting
+
+- `429`: the selected model/provider is rate-limited. The bot retries temporary
+  failures, then uses configured fallback models when available.
+- `402` for voice transcription: add OpenRouter credit. Audio transcription has
+  a minimum account-balance requirement.
+- `No answer returned`: a web search completed without a usable answer. The bot
+  tells the sender to check an official source or try again.
+- Live search requires OpenRouter credit even when a normal text model is free.
+- `ENOTFOUND web.whatsapp.com`: fix the computer's internet or DNS connection.
+
+## Run with PM2
+
+```powershell
+npm.cmd exec pm2 start ecosystem.config.js
+npm.cmd exec pm2 save
 ```
 
 Useful commands:
 
-```bash
-pm2 status
-pm2 logs whatsapp-assistant
-pm2 restart whatsapp-assistant
-pm2 stop whatsapp-assistant
+```powershell
+npm.cmd exec pm2 status
+npm.cmd exec pm2 logs whatsapp-assistant
+npm.cmd exec pm2 restart whatsapp-assistant
+npm.cmd exec pm2 stop whatsapp-assistant
 ```
 
 ## Security
 
-Never share:
+Never share or commit:
 
 - `OPENROUTER_API_KEY`
-- the `.env` file
-- the `sessions/` directory
-- WhatsApp session/credential JSON files
+- `.env`
+- `sessions/`
+- WhatsApp credential files
+- `assistant.sqlite`
 
-If an API key was previously placed in a repository or shared archive, revoke it
-and create a new one.
+If an API key was pasted into a chat, committed to Git, or otherwise exposed,
+revoke it in OpenRouter and create a replacement key.
