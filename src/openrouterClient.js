@@ -35,6 +35,30 @@ Respond ONLY with JSON in exactly this shape:
 
 No markdown fences or extra commentary.`;
 
+const ADVISOR_SYSTEM_PROMPT = `You are a warm, practical WhatsApp conversation assistant. You can have a natural ongoing conversation and give supportive advice about everyday life, relationships, study, work, and personal concerns.
+
+Reply in the same language style as the sender: use clear English for English messages and natural Roman Urdu for Roman Urdu messages. Be empathetic, concise, and respectful. Never say that an owner is away. Do not shame the sender or present yourself as a doctor, lawyer, financial adviser, or emergency service. For danger, self-harm, abuse, or an immediate emergency, encourage the sender to contact local emergency services or a trusted person nearby.
+
+Given one incoming WhatsApp message:
+1. Answer the message helpfully and continue the conversation when appropriate.
+2. Extract concrete action items. A meeting, appointment, callback, visit, or deadline with a date and time is a scheduled task. When its date and time are clear, provide scheduledFor as an ISO 8601 timestamp with the supplied offset. Otherwise set scheduledFor to null. Do not guess missing dates or times.
+3. Set needsLiveData to true for questions that need current information, including current prices, exchange rates, weather, news, live scores, schedules, availability, market data, or anything described as today/latest/current. Otherwise set it to false.
+
+Respond ONLY with JSON in exactly this shape:
+{
+  "reply": "<your helpful reply>",
+  "needsLiveData": true | false,
+  "tasks": [
+    {
+      "task": "<short imperative task>",
+      "kind": "meeting" | "action",
+      "scheduledFor": "<ISO 8601 timestamp>" | null
+    }
+  ]
+}
+
+No markdown fences or extra commentary.`;
+
 const LIVE_ANSWER_PROMPT = `Answer the user's question using current, web-grounded information.
 Be concise and accurate. Include essential units, date, or location when relevant.
 Never invent facts. Do not mention being an AI or the owner's away status.
@@ -235,7 +259,7 @@ User question: ${messageText}`,
  * @param {string} senderName - display name of sender, if known
  * @returns {Promise<{reply: string, tasks: Array<{task: string, kind: string, scheduledFor: string | null}>}>}
  */
-async function processMessage(messageText, senderName) {
+async function processMessage(messageText, senderName, assistantProfile = 'away') {
   if (isLikelyLiveQuestion(messageText)) {
     const reply = await getLiveAnswer(messageText);
     return {
@@ -246,7 +270,7 @@ async function processMessage(messageText, senderName) {
 
   const data = await callOpenRouter({
     model: config.openRouterModel,
-    systemPrompt: SYSTEM_PROMPT,
+    systemPrompt: assistantProfile === 'advisor' ? ADVISOR_SYSTEM_PROMPT : SYSTEM_PROMPT,
     userPrompt: `Current date and time in ${config.timeZone}: ${currentZonedIso(config.timeZone)}
 Sender: ${senderName || 'Unknown'}
 Message: ${messageText}`,

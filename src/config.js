@@ -72,4 +72,11 @@ module.exports = {
     parseInt(process.env.MIN_REPLY_INTERVAL_MS || '15000', 10),
 
   timeZone: timeZone(process.env.APP_TIME_ZONE?.trim() || 'Asia/Karachi'),
+
+  googleCalendarClientId: process.env.GOOGLE_CALENDAR_CLIENT_ID?.trim() || '',
+  googleCalendarClientSecret: process.env.GOOGLE_CALENDAR_CLIENT_SECRET?.trim() || '',
+  googleCalendarRedirectPort: Math.max(1024, parseInt(process.env.GOOGLE_CALENDAR_REDIRECT_PORT || '3000', 10)),
+  googleCalendarReminderMinutes: Math.max(0, parseInt(process.env.GOOGLE_CALENDAR_REMINDER_MINUTES || '30', 10)),
+  calendarTokenEncryptionSecret:
+    process.env.CALENDAR_TOKEN_ENCRYPTION_KEY?.trim() || required('OPENROUTER_API_KEY'),
 };

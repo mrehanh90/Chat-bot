@@ -41,6 +41,18 @@ function getDatabase(userId) {
       message_id TEXT PRIMARY KEY,
       processed_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS calendar_tokens (
+      provider TEXT PRIMARY KEY,
+      encrypted_token TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS calendar_events (
+      task_id INTEGER PRIMARY KEY,
+      provider TEXT NOT NULL,
+      event_id TEXT NOT NULL,
+      event_link TEXT,
+      created_at TEXT NOT NULL
+    );
   `);
   migrateLegacyJson(db, userId);
   databases.set(userId, db);
@@ -109,19 +121,57 @@ function rememberProcessedMessage(userId, messageId) {
 }
 
 function appendTasks(userId, newTasks, meta) {
-  if (!Array.isArray(newTasks) || !newTasks.length) return;
+  if (!Array.isArray(newTasks) || !newTasks.length) return [];
   const insert = getDatabase(userId).prepare('INSERT INTO tasks (task, sender_jid, sender_name, chat_jid, kind, scheduled_for, original_message, created_at, done) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)');
   const createdAt = new Date().toISOString();
+  const createdTasks = [];
   for (const item of newTasks) {
     const task = typeof item === 'string' ? item : item?.task;
     if (typeof task !== 'string' || !task.trim()) continue;
-    insert.run(task.trim(), meta.senderJid, meta.senderName || null, meta.chatJid, item?.kind === 'meeting' ? 'meeting' : 'action', item?.scheduledFor || null, meta.originalMessage || null, createdAt);
+    const kind = item?.kind === 'meeting' ? 'meeting' : 'action';
+    const scheduledFor = item?.scheduledFor || null;
+    const result = insert.run(task.trim(), meta.senderJid, meta.senderName || null, meta.chatJid, kind, scheduledFor, meta.originalMessage || null, createdAt);
+    createdTasks.push({
+      id: Number(result.lastInsertRowid),
+      task: task.trim(),
+      from: meta.senderJid,
+      senderName: meta.senderName || null,
+      chat: meta.chatJid,
+      kind,
+      scheduledFor,
+      originalMessage: meta.originalMessage || null,
+      createdAt,
+      done: false,
+    });
   }
+  return createdTasks;
 }
 
 function readTasks(userId) {
-  return getDatabase(userId).prepare('SELECT task, sender_jid AS "from", sender_name AS senderName, chat_jid AS chat, kind, scheduled_for AS scheduledFor, original_message AS originalMessage, created_at AS createdAt, done FROM tasks ORDER BY id DESC').all()
+  return getDatabase(userId).prepare('SELECT id, task, sender_jid AS "from", sender_name AS senderName, chat_jid AS chat, kind, scheduled_for AS scheduledFor, original_message AS originalMessage, created_at AS createdAt, done FROM tasks ORDER BY id DESC').all()
     .map((task) => ({ ...task, done: Boolean(task.done) }));
+}
+
+function saveCalendarToken(userId, provider, encryptedToken) {
+  getDatabase(userId).prepare('INSERT OR REPLACE INTO calendar_tokens (provider, encrypted_token, updated_at) VALUES (?, ?, ?)')
+    .run(provider, encryptedToken, new Date().toISOString());
+}
+
+function readCalendarToken(userId, provider) {
+  return getDatabase(userId).prepare('SELECT encrypted_token AS encryptedToken FROM calendar_tokens WHERE provider = ?').get(provider)?.encryptedToken || null;
+}
+
+function deleteCalendarToken(userId, provider) {
+  getDatabase(userId).prepare('DELETE FROM calendar_tokens WHERE provider = ?').run(provider);
+}
+
+function readCalendarEvent(userId, taskId) {
+  return getDatabase(userId).prepare('SELECT event_id AS eventId, event_link AS eventLink FROM calendar_events WHERE task_id = ?').get(taskId) || null;
+}
+
+function saveCalendarEvent(userId, taskId, eventId, eventLink) {
+  getDatabase(userId).prepare('INSERT INTO calendar_events (task_id, provider, event_id, event_link, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run(taskId, 'google', eventId, eventLink || null, new Date().toISOString());
 }
 
 module.exports = {
@@ -131,4 +181,9 @@ module.exports = {
   rememberProcessedMessage,
   appendTasks,
   readTasks,
+  saveCalendarToken,
+  readCalendarToken,
+  deleteCalendarToken,
+  readCalendarEvent,
+  saveCalendarEvent,
 };

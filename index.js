@@ -15,6 +15,7 @@ const config = require('./src/config');
 const awayMode = require('./src/awayMode');
 const openrouterClient = require('./src/openrouterClient');
 const taskStore = require('./src/taskStore');
+const googleCalendar = require('./src/googleCalendar');
 const { formatTimestamp } = require('./src/time');
 const {
   assertUserId,
@@ -38,13 +39,13 @@ class SessionManager {
     this.sessions = new Map();
   }
 
-  async register(userId) {
+  async register(userId, pairingNumber = null) {
     assertUserId(userId);
     writeSessionMeta(userId, { status: 'registered' });
-    await this.start(userId);
+    await this.start(userId, pairingNumber);
   }
 
-  async start(userId) {
+  async start(userId, pairingNumber = null) {
     assertUserId(userId);
     const existing = this.sessions.get(userId);
     if (existing?.running || existing?.starting) return existing;
@@ -87,6 +88,15 @@ class SessionManager {
           }
         }
       });
+
+      if (pairingNumber && !state.creds.registered) {
+        const normalizedNumber = pairingNumber.replace(/\D/g, '');
+        if (normalizedNumber.length < 8 || normalizedNumber.length > 15) {
+          throw new Error('Pairing number must include country code and contain 8-15 digits.');
+        }
+        const pairingCode = await sock.requestPairingCode(normalizedNumber);
+        console.log(`\n[${userId}] WhatsApp pairing code: ${pairingCode}\nOn that phone open WhatsApp > Linked devices > Link a device > Link with phone number instead, then enter this code.\n`);
+      }
 
       logger.info({ userId }, 'WhatsApp session started');
       return session;
@@ -203,7 +213,8 @@ class SessionManager {
   }
 
   async handleOwnerCommand(session, text, replyJid) {
-    const cmd = text.trim().toLowerCase();
+    const rawCommand = text.trim();
+    const cmd = rawCommand.toLowerCase();
     const { userId, sock } = session;
     if (cmd === '!away on') {
       awayMode.setEnabled(userId, true);
@@ -225,6 +236,51 @@ class SessionManager {
         ? tasks.map((task, index) => `${index + 1}. ${task.task} (from ${task.senderName || task.from})`).join('\n')
         : 'No pending tasks.';
       await sock.sendMessage(replyJid, { text: `📋 Pending tasks:\n${list}`, linkPreview: false });
+      return true;
+    }
+    if (cmd === '!calendar connect') {
+      try {
+        const url = await googleCalendar.startAuthorization(userId);
+        await sock.sendMessage(replyJid, { text: `Open this link on this computer to connect your Google Calendar:\n${url}\n\nAfter approving access, send !calendar status.`, linkPreview: false });
+      } catch (err) {
+        await sock.sendMessage(replyJid, { text: `Google Calendar connection could not start: ${err.message}`, linkPreview: false });
+      }
+      return true;
+    }
+    if (cmd === '!calendar status') {
+      const status = await googleCalendar.getStatus(userId);
+      const message = !status.configured
+        ? 'Google Calendar credentials are missing from .env.'
+        : status.connected
+          ? `Google Calendar is connected to ${status.email || 'your Google account'} (primary calendar). Reminder: ${config.googleCalendarReminderMinutes} minutes.`
+          : `Google Calendar is not connected. Send !calendar connect.${status.error ? `\nLast check: ${status.error}` : ''}`;
+      await sock.sendMessage(replyJid, { text: message, linkPreview: false });
+      return true;
+    }
+    if (cmd === '!calendar disconnect') {
+      googleCalendar.disconnect(userId);
+      await sock.sendMessage(replyJid, { text: 'Google Calendar has been disconnected for this WhatsApp session.', linkPreview: false });
+      return true;
+    }
+    const addMatch = rawCommand.match(/^!calendar add\s+(\d+)$/i);
+    if (addMatch) {
+      const tasks = taskStore.readTasks(userId).filter((task) => !task.done);
+      const task = tasks[Number(addMatch[1]) - 1];
+      if (!task) {
+        await sock.sendMessage(replyJid, { text: 'Task number not found. Send !tasks first.', linkPreview: false });
+        return true;
+      }
+      try {
+        const event = await googleCalendar.createEvent(userId, task);
+        await sock.sendMessage(replyJid, {
+          text: event.alreadyExists
+            ? `This task is already in Google Calendar. ${event.eventLink || ''}`
+            : `Google Calendar event created with a ${config.googleCalendarReminderMinutes}-minute reminder.\n${event.eventLink || ''}`,
+          linkPreview: false,
+        });
+      } catch (err) {
+        await sock.sendMessage(replyJid, { text: `Could not create calendar event: ${err.message}`, linkPreview: false });
+      }
       return true;
     }
     return false;
@@ -280,6 +336,37 @@ class SessionManager {
         `Original ${source}:`,
         text || '(A location was shared without text.)',
       ].join('\n'), { sender, hasTimeReference, isMeetingRequest, kind: 'meeting_time' });
+  }
+
+  async automaticallyAddMeetingsToCalendar(session, tasks) {
+    const meetings = tasks.filter((task) => task.kind === 'meeting' && task.scheduledFor);
+    if (!meetings.length) return;
+
+    for (const task of meetings) {
+      try {
+        const event = await googleCalendar.createEvent(session.userId, task);
+        if (!event.alreadyExists) {
+          logger.info({ userId: session.userId, taskId: task.id, eventId: event.eventId }, 'Meeting automatically added to Google Calendar');
+          await session.sock.sendMessage(getOwnerJid(session.userId), {
+            text: `[Calendar] Added: ${task.task}\nReminder: ${config.googleCalendarReminderMinutes} minutes.\n${event.eventLink || ''}`,
+            linkPreview: false,
+          });
+        }
+      } catch (err) {
+        // A disconnected calendar must never prevent the WhatsApp reply or task save.
+        logger.warn({ err, userId: session.userId, taskId: task.id }, 'Could not automatically add meeting to Google Calendar');
+      }
+    }
+  }
+
+  assistantProfile(userId) {
+    return readSessionMeta(userId).assistantProfile === 'advisor' ? 'advisor' : 'away';
+  }
+
+  fallbackReply(userId) {
+    return this.assistantProfile(userId) === 'advisor'
+      ? "I'm here with you. Please tell me a little more about what happened."
+      : 'Thanks for your message. The owner is away right now and will get back to you soon.';
   }
 
   async handleIncoming(session, msg) {
@@ -339,11 +426,15 @@ class SessionManager {
       let result = quickReply ? { reply: quickReply, tasks: [] } : null;
       if (!result) {
         try {
-          result = await openrouterClient.processMessage(text.slice(0, config.maxInputChars), senderName);
+          result = await openrouterClient.processMessage(
+            text.slice(0, config.maxInputChars),
+            senderName,
+            this.assistantProfile(userId),
+          );
         } catch (err) {
-          logger.error({ err, userId, chatJid }, 'AI reply failed; using away-message fallback');
+          logger.error({ err, userId, chatJid }, 'AI reply failed; using profile fallback');
           result = {
-            reply: "Thanks for your message. The owner is away right now and will get back to you soon.",
+            reply: this.fallbackReply(userId),
             tasks: [],
           };
         }
@@ -358,7 +449,8 @@ class SessionManager {
       }
 
       if (tasks.length > 0) {
-        taskStore.appendTasks(userId, tasks, { senderJid: chatJid, senderName, chatJid, originalMessage: text });
+        const savedTasks = taskStore.appendTasks(userId, tasks, { senderJid: chatJid, senderName, chatJid, originalMessage: text });
+        await this.automaticallyAddMeetingsToCalendar(session, savedTasks);
         const ownerJid = getOwnerJid(userId);
         if (!ownerJid) return;
 
@@ -443,12 +535,12 @@ function getQuickReply(text) {
 }
 
 function printUsage() {
-  console.log('Usage: node index.js [register <userId> | start <userId> | stop <userId> | list]');
+  console.log('Usage: node index.js [register <userId> | register-pair <userId> <phoneNumber> | set-profile-advisor <userId> | start <userId> | stop <userId> | list | calendar-status <userId>]');
 }
 
 async function main() {
   const manager = new SessionManager();
-  const [command, userId] = process.argv.slice(2);
+  const [command, userId, phoneNumber] = process.argv.slice(2);
 
   console.warn('Privacy notice: this service stores each contact\'s WhatsApp JID, display name, message timestamp, and any location they explicitly share. Voice notes are sent to the configured transcription provider. Ensure you have an appropriate notice and lawful basis before operating it.');
 
@@ -456,6 +548,17 @@ async function main() {
     if (!userId) return printUsage();
     await manager.register(userId);
     console.log(`[${userId}] Registration started. Scan the QR code above to link WhatsApp.`);
+  } else if (command === 'register-pair') {
+    if (!userId || !phoneNumber) return printUsage();
+    await manager.register(userId, phoneNumber);
+    console.log(`[${userId}] Pairing-code registration started.`);
+  } else if (command === 'set-profile-advisor') {
+    if (!userId) return printUsage();
+    assertUserId(userId);
+    writeSessionMeta(userId, { assistantProfile: 'advisor' });
+    awayMode.setEnabled(userId, true);
+    console.log(`[${userId}] Advisor profile enabled. Away Mode is ON.`);
+    return;
   } else if (command === 'start') {
     if (!userId) return printUsage();
     await manager.start(userId);
@@ -464,6 +567,11 @@ async function main() {
     await manager.stop(userId);
   } else if (command === 'list') {
     console.table(listUserIds().map((id) => readSessionMeta(id)));
+    return;
+  } else if (command === 'calendar-status') {
+    if (!userId) return printUsage();
+    const status = await googleCalendar.getStatus(userId);
+    console.table([status]);
     return;
   } else if (!command) {
     const users = listUserIds();

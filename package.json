@@ -7,7 +7,10 @@
   "scripts": {
     "start": "node index.js",
     "register": "node index.js register",
+    "register:pair": "node index.js register-pair",
+    "profile:advisor": "node index.js set-profile-advisor",
     "list-sessions": "node index.js list",
+    "calendar:status": "node index.js calendar-status",
     "dev": "nodemon --ignore sessions index.js",
     "pm2:start": "pm2 start ecosystem.config.js",
     "pm2:restart": "pm2 restart whatsapp-assistant",
@@ -18,6 +21,7 @@
     "@hapi/boom": "^10.0.1",
     "@whiskeysockets/baileys": "7.0.0-rc14",
     "dotenv": "^16.4.5",
+    "googleapis": "^174.0.1",
     "link-preview-js": "^3.2.0",
     "pino": "^9.4.0",
     "qrcode-terminal": "^0.12.0"

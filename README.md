@@ -1,8 +1,8 @@
 # WhatsApp AI Assistant
 
-A multi-session WhatsApp away-mode assistant built with Baileys and OpenRouter.
-Each registered owner has an isolated WhatsApp session, settings, task list, and
-local data store.
+A multi-session WhatsApp assistant built with Baileys and OpenRouter. Each
+registered owner has an isolated WhatsApp session, settings, task list, and
+local data store. A session can use either Away Mode or Advisor Mode.
 
 > Baileys is an unofficial WhatsApp Web client. Automated use may violate
 > WhatsApp terms or cause account restrictions. Use it only with an account you
@@ -12,6 +12,8 @@ local data store.
 
 - Independent WhatsApp sessions under `sessions/<userId>/`.
 - Away-mode replies controlled from the owner's self-chat.
+- Advisor Mode for supportive conversations and practical advice in English or
+  Roman Urdu, matching the sender's language.
 - Direct replies for common greetings, Salaam, and "how are you / kaisa ho".
 - General and personal-topic replies while Away Mode is enabled.
 - Live web-grounded answers for common current questions: weather, gold rates,
@@ -65,6 +67,13 @@ OPENROUTER_MAX_RETRIES=2
 # Voice notes. This model may have usage charges.
 OPENROUTER_TRANSCRIPTION_MODEL=openai/whisper-large-v3
 
+# Google Calendar (optional)
+GOOGLE_CALENDAR_CLIENT_ID=
+GOOGLE_CALENDAR_CLIENT_SECRET=
+GOOGLE_CALENDAR_REDIRECT_PORT=3000
+GOOGLE_CALENDAR_REMINDER_MINUTES=30
+CALENDAR_TOKEN_ENCRYPTION_KEY=
+
 # Local timezone used in meeting alerts and AI scheduling context.
 APP_TIME_ZONE=Asia/Karachi
 
@@ -82,6 +91,36 @@ Create a session and show its QR code:
 ```powershell
 npm run register -- rehan
 ```
+
+### Link by phone number instead of QR
+
+For a new WhatsApp session, request a pairing code instead of a QR code. Use
+the WhatsApp number with country code and no `+` or leading zero:
+
+```powershell
+npm run register:pair -- advisor 923001234567
+```
+
+On that phone, open **WhatsApp → Linked devices → Link a device → Link with
+phone number instead**, then enter the code printed in the terminal.
+
+An already-linked assistant does not need either a QR or a pairing code to
+change its behavior.
+
+### Enable Advisor Mode for the current assistant
+
+To change the existing `rehan` assistant into an English/Roman-Urdu advice and
+conversation assistant, run:
+
+```powershell
+npm run profile:advisor -- rehan
+```
+
+Advisor Mode automatically enables Away Mode so it can respond immediately.
+It can continue conversations, give supportive everyday and relationship
+advice, and retains the same task, meeting alert, Calendar, live-information,
+and voice-note features. It does not replace professional medical, legal,
+financial, or emergency support.
 
 Scan the QR code in WhatsApp:
 
@@ -117,10 +156,20 @@ Send these from the owner's own WhatsApp self-chat:
 !away off
 !away status
 !tasks
+!calendar connect
+!calendar status
+!calendar add 1
+!calendar disconnect
 ```
 
 Normal AI replies require Away Mode to be on. Meeting/time/location alerts are
 forwarded to the owner self-chat even when Away Mode is off.
+
+`!calendar connect` sends a Google authorization link. Open it on the same
+computer running the bot, approve access, then use `!calendar status`.
+Meetings the AI extracts with a valid date and time are automatically added to
+the connected user's primary Google Calendar with the configured reminder.
+`!calendar add 1` remains available to manually add an older saved task.
 
 ## Message behavior
 
@@ -128,7 +177,7 @@ forwarded to the owner self-chat even when Away Mode is off.
 | --- | --- |
 | `AssalamoAlaikum` | Replies `Wa Alaikum Assalam!` |
 | `Kaisa ho?` / `How are you?` | Replies `Alhamdulillah, main theek hoon. Aap sunayein?` |
-| General or personal topic | Gives a concise reply while Away Mode is on |
+| General or personal topic | Away Mode: concise owner-away reply. Advisor Mode: helpful ongoing English/Roman-Urdu conversation. |
 | Current weather, gold rate, news, exchange rate, score | Uses live web-grounded search |
 | Bank hours/timings | Uses live web-grounded search |
 | Meeting, date, time, or shared location | Sends the owner a structured alert and stores AI-extracted tasks when available |
