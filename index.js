@@ -62,6 +62,13 @@ class SessionManager {
       ownerAlertIds: new Map(),
       lastReplyAtByChat: new Map(Object.entries(readLastReplyTimestamps(userId))),
     };
+    if (pairingNumber) {
+      const normalizedNumber = pairingNumber.replace(/\D/g, '');
+      if (normalizedNumber.length < 8 || normalizedNumber.length > 15) {
+        throw new Error('Pairing number must include country code and contain 8-15 digits.');
+      }
+      session.pairingNumber = normalizedNumber;
+    }
     session.manuallyStopped = false;
     session.starting = true;
     this.sessions.set(userId, session);
@@ -89,15 +96,6 @@ class SessionManager {
         }
       });
 
-      if (pairingNumber && !state.creds.registered) {
-        const normalizedNumber = pairingNumber.replace(/\D/g, '');
-        if (normalizedNumber.length < 8 || normalizedNumber.length > 15) {
-          throw new Error('Pairing number must include country code and contain 8-15 digits.');
-        }
-        const pairingCode = await sock.requestPairingCode(normalizedNumber);
-        console.log(`\n[${userId}] WhatsApp pairing code: ${pairingCode}\nOn that phone open WhatsApp > Linked devices > Link a device > Link with phone number instead, then enter this code.\n`);
-      }
-
       logger.info({ userId }, 'WhatsApp session started');
       return session;
     } catch (err) {
@@ -105,6 +103,31 @@ class SessionManager {
       session.running = false;
       logger.error({ err, userId }, 'Failed to start user session');
       throw err;
+    }
+  }
+
+  async requestPairingCodeWhenReady(session, state, sock) {
+    if (session.pairingInProgress || !session.pairingNumber) return;
+    session.pairingInProgress = true;
+
+    try {
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        if (session.sock !== sock || state.creds.registered || session.manuallyStopped) return;
+        // The first request runs after the QR/pairing-ready event. Retries wait
+        // briefly in case WhatsApp is still completing its transport handshake.
+        if (attempt > 1) await wait(1500 * (attempt - 1));
+        try {
+          const pairingCode = await sock.requestPairingCode(session.pairingNumber);
+          console.log(`\n[${session.userId}] WhatsApp pairing code: ${pairingCode}\nOn that phone open WhatsApp > Linked devices > Link a device > Link with phone number instead, then enter this code.\n`);
+          logger.info({ userId: session.userId }, 'WhatsApp pairing code generated');
+          return;
+        } catch (err) {
+          logger.warn({ err, userId: session.userId, attempt }, 'Pairing code request was not ready; retrying');
+        }
+      }
+      logger.error({ userId: session.userId }, 'Could not generate pairing code after retries. Check internet and run the register-pair command again.');
+    } finally {
+      session.pairingInProgress = false;
     }
   }
 
@@ -135,7 +158,11 @@ class SessionManager {
     // Ignore events emitted by a socket that was replaced during reconnect.
     if (session.sock !== sock) return;
 
-    if (qr) {
+    if (qr && session.pairingNumber && !state.creds.registered) {
+      // The QR event is the pairing-ready signal used by Baileys' own example.
+      // Requesting the code before this point can trigger a 401 disconnect.
+      void this.requestPairingCodeWhenReady(session, state, sock);
+    } else if (qr) {
       console.log(`\n[${userId}] Scan this QR code in WhatsApp → Linked Devices:\n`);
       qrcode.generate(qr, { small: true });
     }
@@ -241,7 +268,7 @@ class SessionManager {
     if (cmd === '!calendar connect') {
       try {
         const url = await googleCalendar.startAuthorization(userId);
-        await sock.sendMessage(replyJid, { text: `Open this link on this computer to connect your Google Calendar:\n${url}\n\nAfter approving access, send !calendar status.`, linkPreview: false });
+        await sock.sendMessage(replyJid, { text: `${googleCalendar.authorizationInstructions()}\n\n${url}`, linkPreview: false });
       } catch (err) {
         await sock.sendMessage(replyJid, { text: `Google Calendar connection could not start: ${err.message}`, linkPreview: false });
       }
@@ -468,6 +495,10 @@ class SessionManager {
       await sock.sendPresenceUpdate('paused', chatJid).catch(() => undefined);
     }
   }
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function extractText(message) {

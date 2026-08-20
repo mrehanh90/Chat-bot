@@ -20,6 +20,20 @@ function timeZone(value) {
   }
 }
 
+function optionalPublicUrl(value) {
+  if (!value || !value.trim()) return '';
+  let url;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    throw new Error('GOOGLE_CALENDAR_REDIRECT_URI must be a valid HTTPS URL.');
+  }
+  if (url.protocol !== 'https:' || url.search || url.hash) {
+    throw new Error('GOOGLE_CALENDAR_REDIRECT_URI must be an HTTPS URL without query parameters or a fragment.');
+  }
+  return url.toString().replace(/\/$/, '');
+}
+
 module.exports = {
   // OpenRouter
   openRouterApiKey: required('OPENROUTER_API_KEY'),
@@ -75,7 +89,11 @@ module.exports = {
 
   googleCalendarClientId: process.env.GOOGLE_CALENDAR_CLIENT_ID?.trim() || '',
   googleCalendarClientSecret: process.env.GOOGLE_CALENDAR_CLIENT_SECRET?.trim() || '',
+  // Optional public HTTPS callback. When configured through a reverse proxy or
+  // tunnel, the Google approval link can be completed on a mobile phone.
+  googleCalendarRedirectUri: optionalPublicUrl(process.env.GOOGLE_CALENDAR_REDIRECT_URI),
   googleCalendarRedirectPort: Math.max(1024, parseInt(process.env.GOOGLE_CALENDAR_REDIRECT_PORT || '3000', 10)),
+  googleCalendarCallbackHost: process.env.GOOGLE_CALENDAR_CALLBACK_HOST?.trim() || '127.0.0.1',
   googleCalendarReminderMinutes: Math.max(0, parseInt(process.env.GOOGLE_CALENDAR_REMINDER_MINUTES || '30', 10)),
   calendarTokenEncryptionSecret:
     process.env.CALENDAR_TOKEN_ENCRYPTION_KEY?.trim() || required('OPENROUTER_API_KEY'),

@@ -70,7 +70,11 @@ OPENROUTER_TRANSCRIPTION_MODEL=openai/whisper-large-v3
 # Google Calendar (optional)
 GOOGLE_CALENDAR_CLIENT_ID=
 GOOGLE_CALENDAR_CLIENT_SECRET=
+# Optional public HTTPS URL for mobile Calendar approval, for example:
+# https://calendar.example.com/oauth2callback
+GOOGLE_CALENDAR_REDIRECT_URI=
 GOOGLE_CALENDAR_REDIRECT_PORT=3000
+GOOGLE_CALENDAR_CALLBACK_HOST=127.0.0.1
 GOOGLE_CALENDAR_REMINDER_MINUTES=30
 CALENDAR_TOKEN_ENCRYPTION_KEY=
 
@@ -104,6 +108,10 @@ npm run register:pair -- advisor 923001234567
 On that phone, open **WhatsApp → Linked devices → Link a device → Link with
 phone number instead**, then enter the code printed in the terminal.
 
+Use one WhatsApp number for only one running user session. Linking the same
+number to two active sessions can cause duplicate replies and separate task or
+Calendar records.
+
 An already-linked assistant does not need either a QR or a pairing code to
 change its behavior.
 
@@ -130,6 +138,12 @@ Start every registered session later with:
 
 ```powershell
 npm start
+```
+
+Start only one named session (recommended while testing a new assistant):
+
+```powershell
+npm run start:session -- advisor
 ```
 
 List sessions:
@@ -165,8 +179,24 @@ Send these from the owner's own WhatsApp self-chat:
 Normal AI replies require Away Mode to be on. Meeting/time/location alerts are
 forwarded to the owner self-chat even when Away Mode is off.
 
-`!calendar connect` sends a Google authorization link. Open it on the same
-computer running the bot, approve access, then use `!calendar status`.
+`!calendar connect` sends a Google authorization link. By default it must be
+opened on the same computer running the bot because the callback uses
+`127.0.0.1`. To authorize on a mobile phone, configure a public HTTPS callback:
+
+1. Create a **Web application** OAuth client in the same Google Cloud project.
+2. Add an exact authorized redirect URI such as
+   `https://calendar.example.com/oauth2callback` in Google Cloud.
+3. Point `GOOGLE_CALENDAR_CLIENT_ID` and `GOOGLE_CALENDAR_CLIENT_SECRET` to
+   that Web client, then set `GOOGLE_CALENDAR_REDIRECT_URI` to the same HTTPS
+   address.
+4. Use a secure reverse proxy or tunnel to forward that public callback to the
+   running bot at `127.0.0.1:3000`. Keep
+   `GOOGLE_CALENDAR_CALLBACK_HOST=127.0.0.1` unless the proxy is on another
+   machine.
+
+With the public HTTPS callback configured, the `!calendar connect` link can be
+opened and approved on a phone. The bot must remain running until approval is
+complete. Use `!calendar status` afterward to confirm the connection.
 Meetings the AI extracts with a valid date and time are automatically added to
 the connected user's primary Google Calendar with the configured reminder.
 `!calendar add 1` remains available to manually add an older saved task.
@@ -227,6 +257,20 @@ this service.
   tells the sender to check an official source or try again.
 - Live search requires OpenRouter credit even when a normal text model is free.
 - `ENOTFOUND web.whatsapp.com`: fix the computer's internet or DNS connection.
+
+## WhatsApp linking troubleshooting
+
+- A QR code repeating in the terminal means that session is not linked. A QR
+  expires quickly; Baileys requests a fresh one after the old QR expires. Scan
+  the newest QR once and wait for the log line `WhatsApp user session connected`.
+- If you only want to use one assistant during testing, start only that session
+  with `npm run start:session -- <userId>` instead of `npm start`, which starts
+  every registered session.
+- If a session repeatedly shows `not logged in, attempting registration`, its
+  `baileys_auth_info` credentials are missing, invalid, or were removed. Relink
+  that one session with QR or pairing code.
+- Do not run two sessions linked to the same WhatsApp number. That can cause
+  duplicate replies and separate task/Calendar records.
 
 ## Run with PM2
 

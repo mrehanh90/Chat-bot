@@ -6,6 +6,7 @@
   "type": "commonjs",
   "scripts": {
     "start": "node index.js",
+    "start:session": "node index.js start",
     "register": "node index.js register",
     "register:pair": "node index.js register-pair",
     "profile:advisor": "node index.js set-profile-advisor",

@@ -28,7 +28,17 @@ class GoogleCalendarClient {
   }
 
   redirectUri() {
-    return `http://127.0.0.1:${config.googleCalendarRedirectPort}/oauth2callback`;
+    return config.googleCalendarRedirectUri || `http://127.0.0.1:${config.googleCalendarRedirectPort}/oauth2callback`;
+  }
+
+  usesPublicRedirect() {
+    return Boolean(config.googleCalendarRedirectUri);
+  }
+
+  authorizationInstructions() {
+    return this.usesPublicRedirect()
+      ? 'Open this link on your phone or any browser, approve Google Calendar access, then return to WhatsApp and send !calendar status.'
+      : 'Open this link on the same computer running the bot, approve Google Calendar access, then return to WhatsApp and send !calendar status.';
   }
 
   createOAuthClient() {
@@ -58,7 +68,7 @@ class GoogleCalendarClient {
     await new Promise((resolve, reject) => {
       const server = http.createServer((req, res) => this.handleCallback(req, res));
       server.once('error', reject);
-      server.listen(config.googleCalendarRedirectPort, '127.0.0.1', () => {
+      server.listen(config.googleCalendarRedirectPort, config.googleCalendarCallbackHost, () => {
         server.off('error', reject);
         this.server = server;
         resolve();
@@ -68,7 +78,7 @@ class GoogleCalendarClient {
 
   async handleCallback(req, res) {
     const url = new URL(req.url, this.redirectUri());
-    if (url.pathname !== '/oauth2callback') {
+    if (url.pathname !== new URL(this.redirectUri()).pathname) {
       res.writeHead(404).end('Not found');
       return;
     }
