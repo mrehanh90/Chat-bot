@@ -8,6 +8,9 @@ const {
   jidNormalizedUser,
 } = require('@whiskeysockets/baileys');
 const qrcode = require('qrcode-terminal');
+const fs = require('fs');
+const QRCode = require('qrcode-terminal/vendor/QRCode');
+const QRErrorCorrectLevel = require('qrcode-terminal/vendor/QRCode/QRErrorCorrectLevel');
 const pino = require('pino');
 const { Boom } = require('@hapi/boom');
 
@@ -39,10 +42,15 @@ class SessionManager {
     this.sessions = new Map();
   }
 
-  async register(userId, pairingNumber = null) {
+  async register(userId, pairingNumber = null, replaceSavedLink = false) {
     assertUserId(userId);
+    if (replaceSavedLink) {
+      await this.stop(userId);
+      fs.rmSync(getSessionPath(userId, 'baileys_auth_info'), { recursive: true, force: true });
+      writeSessionMeta(userId, { ownerJid: null, status: 'registered', reLinkedAt: new Date().toISOString() });
+    }
     writeSessionMeta(userId, { status: 'registered' });
-    await this.start(userId, pairingNumber);
+    return this.start(userId, pairingNumber);
   }
 
   async start(userId, pairingNumber = null) {
@@ -71,6 +79,8 @@ class SessionManager {
     }
     session.manuallyStopped = false;
     session.starting = true;
+    session.connectionStatus = 'starting';
+    session.linkError = null;
     this.sessions.set(userId, session);
 
     try {
@@ -118,6 +128,8 @@ class SessionManager {
         if (attempt > 1) await wait(1500 * (attempt - 1));
         try {
           const pairingCode = await sock.requestPairingCode(session.pairingNumber);
+          session.pairingCode = pairingCode;
+          session.lastQrMatrix = null;
           console.log(`\n[${session.userId}] WhatsApp pairing code: ${pairingCode}\nOn that phone open WhatsApp > Linked devices > Link a device > Link with phone number instead, then enter this code.\n`);
           logger.info({ userId: session.userId }, 'WhatsApp pairing code generated');
           return;
@@ -126,6 +138,7 @@ class SessionManager {
         }
       }
       logger.error({ userId: session.userId }, 'Could not generate pairing code after retries. Check internet and run the register-pair command again.');
+      session.linkError = 'WhatsApp could not generate a pairing code. Use QR linking, or stop this session and try again after a minute.';
     } finally {
       session.pairingInProgress = false;
     }
@@ -158,19 +171,31 @@ class SessionManager {
     // Ignore events emitted by a socket that was replaced during reconnect.
     if (session.sock !== sock) return;
 
+    if (qr && !session.pairingNumber) {
+      // QR and pairing-code flows are kept separate in the dashboard. This
+      // prevents a code-link request from unexpectedly showing a QR instead.
+      session.lastQrMatrix = createQrMatrix(qr);
+    }
+
     if (qr && session.pairingNumber && !state.creds.registered) {
+      session.connectionStatus = 'linking';
       // The QR event is the pairing-ready signal used by Baileys' own example.
       // Requesting the code before this point can trigger a 401 disconnect.
       void this.requestPairingCodeWhenReady(session, state, sock);
     } else if (qr) {
+      session.connectionStatus = 'linking';
       console.log(`\n[${userId}] Scan this QR code in WhatsApp → Linked Devices:\n`);
+      session.pairingCode = null;
       qrcode.generate(qr, { small: true });
     }
 
     if (connection === 'open') {
+      session.connectionStatus = 'connected';
       session.reconnectAttempt = 0;
       clearTimeout(session.reconnectTimer);
       session.reconnectTimer = null;
+      session.lastQrMatrix = null;
+      session.pairingCode = null;
       const ownerJid = jidNormalizedUser(state.creds.me?.lid || state.creds.me?.id);
       writeSessionMeta(userId, { ownerJid, status: 'connected', connectedAt: new Date().toISOString() });
       logger.info({ userId, ownerJid }, 'WhatsApp user session connected');
@@ -182,9 +207,11 @@ class SessionManager {
     const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
     const loggedOut = statusCode === DisconnectReason.loggedOut;
     session.running = false;
+    session.connectionStatus = loggedOut ? 'logged_out' : 'reconnecting';
     session.sock = null;
 
     if (loggedOut) {
+      session.linkError = 'WhatsApp closed this link attempt. Generate a fresh QR code or pairing code and try again.';
       writeSessionMeta(userId, { status: 'logged_out', loggedOutAt: new Date().toISOString() });
       logger.warn({ userId, statusCode }, 'User session logged out; run the register command again to link a new device');
       return;
@@ -501,6 +528,28 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function createQrMatrix(value) {
+  const code = new QRCode(-1, QRErrorCorrectLevel.L);
+  code.addData(value);
+  code.make();
+  return code.modules.map((row) => row.map(Boolean));
+}
+
+function getDashboardSessions(manager) {
+  return listUserIds().map((userId) => {
+    const meta = readSessionMeta(userId);
+    const active = manager.sessions.get(userId);
+    return {
+      userId,
+      status: active?.connectionStatus || meta.status || 'registered',
+      ownerJid: meta.ownerJid || null,
+      pairingCode: active?.pairingCode || null,
+      qrMatrix: active?.lastQrMatrix || null,
+      linkError: active?.linkError || null,
+    };
+  });
+}
+
 function extractText(message) {
   if (!message) return '';
   return (message.conversation || message.extendedTextMessage?.text || message.imageMessage?.caption || message.videoMessage?.caption || '').trim();
@@ -626,7 +675,11 @@ async function main() {
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 }
 
-main().catch((err) => {
-  logger.error({ err }, 'Fatal service startup error');
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    logger.error({ err }, 'Fatal service startup error');
+    process.exit(1);
+  });
+}
+
+module.exports = { SessionManager, getDashboardSessions };

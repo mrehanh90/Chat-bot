@@ -90,6 +90,42 @@ Do not commit `.env` or `sessions/`.
 
 ## Register and link WhatsApp
 
+### Local dashboard (easiest)
+
+Start a small local dashboard that can create a user session, show a QR code,
+or request a phone pairing code:
+
+```powershell
+npm run dashboard
+```
+
+Open <http://127.0.0.1:3012> on the same computer. It is intentionally bound
+to that computer only; do not expose it to the public internet. Enter a unique
+user ID, select QR or phone pairing, and follow the instructions displayed.
+Keep the terminal running until the dashboard reports **Connected**.
+
+### Administrator session page
+
+The session list and stop controls are on a separate protected page:
+
+```text
+http://127.0.0.1:3012/admin
+```
+
+Initial login: username `admin`, password `admin`. Change these in `.env`
+before letting anyone else use the local dashboard:
+
+```env
+DASHBOARD_ADMIN_USERNAME=admin
+DASHBOARD_ADMIN_PASSWORD=choose_a_strong_password_here
+```
+
+If the selected user ID was linked in the past, select **Replace this user
+ID's saved WhatsApp link** before generating a new QR or pairing code. This
+removes only the bot's saved login for that user ID; it never removes WhatsApp
+chat history. QR and phone-code linking remain separate so the requested
+linking method is always displayed.
+
 Create a session and show its QR code:
 
 ```powershell

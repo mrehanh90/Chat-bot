@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WhatsApp Assistant Dashboard</title>
+  <style>
+    body { margin: 0; background: #f5f7fb; color: #182230; font: 16px system-ui, Segoe UI, sans-serif; }
+    main { max-width: 860px; margin: 36px auto; padding: 0 20px; }
+    section { background: white; border: 1px solid #dfe5ee; border-radius: 12px; padding: 22px; margin: 20px 0; }
+    label { display: block; font-weight: 650; margin: 14px 0 6px; }
+    input, select, button { box-sizing: border-box; font: inherit; border-radius: 7px; padding: 11px; }
+    input, select { width: 100%; border: 1px solid #aebaca; }
+    button { cursor: pointer; border: 0; background: #096b42; color: white; margin-top: 18px; }
+    button.secondary { background: #536273; margin: 0; }
+    .muted { color: #526173; font-size: 14px; }
+    .notice { background: #fff5d6; border-radius: 7px; padding: 11px; }
+    .check { display: flex; align-items: flex-start; gap: 8px; font-weight: 400; }
+    .check input { width: auto; margin-top: 5px; }
+    #qrPanel { display: none; margin-top: 20px; }
+    #qr { width: min(360px, 100%); image-rendering: pixelated; background: white; padding: 12px; }
+    #message { font-weight: 650; min-height: 24px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 10px; }
+    th, td { text-align: left; padding: 10px; border-bottom: 1px solid #e5e9ef; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>WhatsApp Assistant Dashboard</h1>
+    <p class="muted">Dashboard build 3 — local-only at port 3012. <a href="/admin/login">Administrator sessions</a></p>
+
+    <section>
+      <h2>Link a WhatsApp account</h2>
+
+      <label for="userId">User ID</label>
+      <input id="userId" placeholder="Example: advisor" autocomplete="off">
+
+      <label for="method">Link method</label>
+      <select id="method">
+        <option value="qr">QR code (recommended)</option>
+        <option value="pair">Phone pairing code (8-character code)</option>
+      </select>
+
+      <label for="phoneNumber">WhatsApp phone number</label>
+      <input id="phoneNumber" placeholder="923392554286" inputmode="numeric" autocomplete="tel">
+      <p class="muted">Required only for Phone pairing code. Include country code; do not use + or a leading zero.</p>
+
+      <label class="check"><input id="replaceSavedLink" type="checkbox"> Replace this user ID's saved bot login and generate a fresh link.</label>
+      <p class="muted">This removes only the bot's saved login for this user ID. It never deletes WhatsApp messages.</p>
+
+      <button id="generate" type="button">Generate link</button>
+      <p id="message"></p>
+
+      <div id="qrPanel">
+        <canvas id="qr"></canvas>
+        <h3 id="linkTitle"></h3>
+        <ol id="instructions"></ol>
+      </div>
+    </section>
+
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
