@@ -19,7 +19,7 @@ const awayMode = require('./src/awayMode');
 const openrouterClient = require('./src/openrouterClient');
 const taskStore = require('./src/taskStore');
 const googleCalendar = require('./src/googleCalendar');
-const { formatTimestamp } = require('./src/time');
+const { currentZonedIso, formatTimestamp } = require('./src/time');
 const {
   assertUserId,
   getSessionPath,
@@ -423,6 +423,23 @@ class SessionManager {
       : 'Thanks for your message. The owner is away right now and will get back to you soon.';
   }
 
+  offlineResult(userId, text) {
+    if (containsMeetingReference(text)) {
+      const scheduledFor = parseExplicitSchedule(text);
+      return {
+        reply: scheduledFor
+          ? 'Thank you. I have noted the meeting details and forwarded them to the owner.'
+          : 'Thank you. I have forwarded the meeting details to the owner for confirmation.',
+        tasks: [{
+          task: 'Review and confirm the meeting request',
+          kind: 'meeting',
+          scheduledFor,
+        }],
+      };
+    }
+    return { reply: this.fallbackReply(userId), tasks: [] };
+  }
+
   async handleIncoming(session, msg) {
     const id = msg.key?.id;
     if (!id || session.processedMessageIds.has(id) || !rememberProcessedMessage(session.userId, id)) return;
@@ -487,10 +504,7 @@ class SessionManager {
           );
         } catch (err) {
           logger.error({ err, userId, chatJid }, 'AI reply failed; using profile fallback');
-          result = {
-            reply: this.fallbackReply(userId),
-            tasks: [],
-          };
+          result = this.offlineResult(userId, text);
         }
       }
 
@@ -573,7 +587,7 @@ function containsTimeReference(text) {
 }
 
 function containsMeetingReference(text) {
-  return /\b(?:meeting|meet|appointment|schedule|call|mulaqat|meeting\s+hai)\b/i.test(text || '');
+  return /\b(?:meeting|meet|appointment|session|schedule|call|mulaqat|meeting\s+hai)\b/i.test(text || '');
 }
 
 function containsSchedulingTimeReference(text) {
@@ -581,8 +595,56 @@ function containsSchedulingTimeReference(text) {
   const explicitTimeOrDate = /\b(?:\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?|am|pm)|\d{1,2}\s*o['’]?clock|\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?|monday|tuesday|wednesday|thursday|friday|saturday|sunday|noon|midnight|baje|baja|bjy|bje)\b/i;
   if (explicitTimeOrDate.test(text)) return true;
   const relativeTime = /\b(?:today|tomorrow|tonight|this\s+(?:morning|afternoon|evening|weekend)|next\s+week|morning|afternoon|evening)\b/i;
-  const schedulingContext = /\b(?:meet(?:ing)?|appointment|schedule|call|visit|come|deadline|remind|task|mulaqat)\b/i;
+  const schedulingContext = /\b(?:meet(?:ing)?|appointment|session|schedule|call|visit|come|deadline|remind|task|mulaqat)\b/i;
   return relativeTime.test(text) && schedulingContext.test(text);
+}
+
+function parseExplicitSchedule(text) {
+  if (!text) return null;
+  const clock = text.match(/\b(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b/i);
+  if (!clock) return null;
+
+  let hour = Number(clock[1]);
+  const minute = Number(clock[2] || 0);
+  if (hour < 1 || hour > 12 || minute > 59) return null;
+  const meridiem = clock[3].toLowerCase().replace(/\./g, '');
+  if (meridiem === 'pm' && hour !== 12) hour += 12;
+  if (meridiem === 'am' && hour === 12) hour = 0;
+
+  const now = currentZonedIso(config.timeZone);
+  const offset = now.slice(-6);
+  let [year, month, day] = now.slice(0, 10).split('-').map(Number);
+  const monthNames = {
+    jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3,
+    apr: 4, april: 4, may: 5, jun: 6, june: 6, jul: 7, july: 7,
+    aug: 8, august: 8, sep: 9, sept: 9, september: 9, oct: 10,
+    october: 10, nov: 11, november: 11, dec: 12, december: 12,
+  };
+  const namedDate = text.match(/\b(\d{1,2})\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{4})\b/i);
+  const numericDate = text.match(/\b(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})\b/);
+
+  if (namedDate) {
+    day = Number(namedDate[1]);
+    month = monthNames[namedDate[2].toLowerCase()];
+    year = Number(namedDate[3]);
+  } else if (numericDate) {
+    day = Number(numericDate[1]);
+    month = Number(numericDate[2]);
+    year = Number(numericDate[3]);
+  } else if (/\btomorrow\b/i.test(text)) {
+    const next = new Date(Date.UTC(year, month - 1, day + 1));
+    year = next.getUTCFullYear();
+    month = next.getUTCMonth() + 1;
+    day = next.getUTCDate();
+  } else if (!/\btoday\b/i.test(text)) {
+    return null;
+  }
+
+  const candidate = `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00${offset}`;
+  const parsed = new Date(candidate);
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  if (Number.isNaN(parsed.getTime()) || month < 1 || month > 12 || day < 1 || day > daysInMonth) return null;
+  return candidate;
 }
 
 function extractTimeReference(text) {
@@ -609,6 +671,10 @@ function getQuickReply(text) {
 
   if (/\b(?:how are you|how r u|kaisa(?: ho| haan| hain)?|kaise(?: ho| haan| hain)?|kesa(?: ho| haan| hain)?|kese(?: ho| haan| hain)?|kasa(?: ho| haan| hain)?|kya haal|kia haal)\b/.test(normalized)) {
     return 'Alhamdulillah, main theek hoon. Aap sunayein?';
+  }
+
+  if (/\b(?:what can you do|what you can do|how can you help|aap kya kar sakte|tum kya kar sakte)\b/.test(normalized)) {
+    return 'I can answer general questions, help with everyday concerns, note meeting details, forward reminders to the owner, and—when connected—add scheduled meetings to Google Calendar.';
   }
 
   return '';
@@ -682,4 +748,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { SessionManager, getDashboardSessions };
+module.exports = { SessionManager, getDashboardSessions, parseExplicitSchedule };
