@@ -99,9 +99,9 @@ or request a phone pairing code:
 npm run dashboard
 ```
 
-Open <http://127.0.0.1:3012> on the same computer. It is intentionally bound
-to that computer only; do not expose it to the public internet. Enter a unique
-user ID, select QR or phone pairing, and follow the instructions displayed.
+Open <http://127.0.0.1:3012> on the same computer. Enter the administrator
+credentials, then enter a unique user ID, select QR or phone pairing, and
+follow the instructions displayed.
 Keep the terminal running until the dashboard reports **Connected**.
 
 ### Administrator session page
@@ -112,12 +112,59 @@ The session list and stop controls are on a separate protected page:
 http://127.0.0.1:3012/admin
 ```
 
-Initial login: username `admin`, password `admin`. Change these in `.env`
-before letting anyone else use the local dashboard:
+Initial login: username `admin`, password `admin`. Change the password in
+`.env` before letting anyone else use the dashboard:
 
 ```env
 DASHBOARD_ADMIN_USERNAME=admin
 DASHBOARD_ADMIN_PASSWORD=choose_a_strong_password_here
+```
+
+### Secure public mobile access (no personal domain required)
+
+Do not open EC2 port `3012` to `0.0.0.0/0`. Keep the dashboard bound to
+`127.0.0.1` and publish it through an HTTPS reverse tunnel. Tailscale Funnel
+provides a public `https://...ts.net` address without requiring a personal
+domain.
+
+For public mode, configure a unique password of at least 12 characters:
+
+```env
+DASHBOARD_ADMIN_USERNAME=admin
+DASHBOARD_ADMIN_PASSWORD=replace_with_a_long_unique_password
+DASHBOARD_HOST=127.0.0.1
+DASHBOARD_PORT=3012
+DASHBOARD_PUBLIC=true
+DASHBOARD_SECURE_COOKIE=true
+DASHBOARD_SESSION_HOURS=12
+```
+
+On the Ubuntu EC2 instance, install Tailscale, authenticate the server, start
+the dashboard, and publish only that local service:
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+npm run dashboard
+```
+
+In another SSH terminal on the instance:
+
+```bash
+sudo tailscale funnel --bg 3012
+tailscale funnel status
+```
+
+Open the HTTPS URL printed by the status command on the mobile phone and sign
+in with the dashboard administrator credentials. Funnel may ask you to enable
+HTTPS, MagicDNS, and the Funnel permission on first use. The dashboard protects
+all linking and session-management endpoints, rate-limits failed logins, and
+uses a secure login cookie in public mode.
+
+To remove public access:
+
+```bash
+sudo tailscale funnel reset
 ```
 
 If the selected user ID was linked in the past, select **Replace this user
