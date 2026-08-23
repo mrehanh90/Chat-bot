@@ -1,6 +1,7 @@
 const byId = (id) => document.getElementById(id);
 let selectedUserId = '';
 let selectedMethod = 'qr';
+let linkToken = '';
 
 function setMessage(text) {
   byId('message').textContent = text;
@@ -52,7 +53,7 @@ function escapeHtml(value) {
 async function refresh() {
   try {
     if (!selectedUserId) return;
-    const response = await request(`/api/link-status?userId=${encodeURIComponent(selectedUserId)}`);
+    const response = await request(`/api/link-status?userId=${encodeURIComponent(selectedUserId)}&token=${encodeURIComponent(linkToken)}`);
     const active = response.session;
     if (!active) return;
     showLink(active);
@@ -71,22 +72,20 @@ byId('generate').onclick = async () => {
   const userId = byId('userId').value.trim();
   const method = byId('method').value;
   const phoneNumber = byId('phoneNumber').value.trim();
-  const replaceSavedLink = byId('replaceSavedLink').checked;
 
   if (!userId) return setMessage('Enter a User ID first.');
   if (method === 'pair' && !phoneNumber) return setMessage('Enter the WhatsApp phone number first.');
-  if (replaceSavedLink && !confirm(`Replace the saved bot login for ${userId}?`)) return;
-
   try {
     selectedUserId = userId;
     selectedMethod = method;
     byId('qrPanel').style.display = 'none';
     setMessage(method === 'pair' ? 'Generating your 8-character phone link code…' : 'Generating QR code…');
-    await request('/api/sessions', {
+    const result = await request('/api/sessions', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ userId, method, phoneNumber, replaceSavedLink }),
+      body: JSON.stringify({ userId, method, phoneNumber }),
     });
+    linkToken = result.linkToken;
     setTimeout(refresh, 900);
   } catch (error) {
     setMessage(error.message);

@@ -16,6 +16,7 @@ const SECURE_COOKIE = String(process.env.DASHBOARD_SECURE_COOKIE || PUBLIC_ACCES
 const SESSION_HOURS = Math.max(1, Number.parseInt(process.env.DASHBOARD_SESSION_HOURS || '12', 10));
 const adminTokens = new Map();
 const loginAttempts = new Map();
+const publicLinkTokens = new Map();
 
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new Error('DASHBOARD_PORT must be a valid TCP port.');
 if (PUBLIC_ACCESS && (ADMIN_PASSWORD === 'admin' || ADMIN_PASSWORD.length < 12)) {
@@ -97,14 +98,8 @@ const server = http.createServer(async (request, response) => {
   try {
     const url = new URL(request.url, `http://${HOST}:${PORT}`);
     if (request.method === 'GET' && url.pathname === '/health') return sendJson(response, 200, { ok: true });
-    if (request.method === 'GET' && url.pathname === '/') {
-      if (!isAdmin(request)) return redirectToLogin(response);
-      return sendFile(response, 'index.html', 'text/html; charset=utf-8');
-    }
-    if (request.method === 'GET' && url.pathname === '/app.js') {
-      if (!isAdmin(request)) return redirectToLogin(response);
-      return sendFile(response, 'app.js', 'application/javascript; charset=utf-8');
-    }
+    if (request.method === 'GET' && url.pathname === '/') return sendFile(response, 'index.html', 'text/html; charset=utf-8');
+    if (request.method === 'GET' && url.pathname === '/app.js') return sendFile(response, 'app.js', 'application/javascript; charset=utf-8');
     if (request.method === 'GET' && url.pathname === '/admin/login') return sendFile(response, 'admin-login.html', 'text/html; charset=utf-8');
     if (request.method === 'GET' && url.pathname === '/admin') {
       if (!isAdmin(request)) {
@@ -141,17 +136,26 @@ const server = http.createServer(async (request, response) => {
       return sendJson(response, 200, { sessions: getDashboardSessions(manager) });
     }
     if (request.method === 'POST' && url.pathname === '/api/sessions') {
-      if (!requireAdmin(request, response)) return;
       const { userId, method, phoneNumber, replaceSavedLink } = await readBody(request);
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(userId || '')) throw new Error('User ID may contain only letters, numbers, underscores, and hyphens.');
       if (!['qr', 'pair'].includes(method)) throw new Error('Choose QR code or phone pairing code.');
       if (method === 'pair' && !phoneNumber) throw new Error('Enter the WhatsApp phone number for phone pairing.');
-      await manager.register(userId, method === 'pair' ? phoneNumber : null, replaceSavedLink === true);
-      return sendJson(response, 202, { ok: true });
+      const exists = getDashboardSessions(manager).some((entry) => entry.userId === userId);
+      const admin = isAdmin(request);
+      if (exists && !admin) throw new Error('This User ID already exists. Ask the administrator to relink it.');
+      if (replaceSavedLink === true && !admin) throw new Error('Only an administrator can replace an existing WhatsApp link.');
+      await manager.register(userId, method === 'pair' ? phoneNumber : null, admin && replaceSavedLink === true);
+      const linkToken = crypto.randomBytes(32).toString('hex');
+      publicLinkTokens.set(linkToken, { userId, expiresAt: Date.now() + 15 * 60_000 });
+      return sendJson(response, 202, { ok: true, linkToken });
     }
     if (request.method === 'GET' && url.pathname === '/api/link-status') {
-      if (!requireAdmin(request, response)) return;
       const userId = url.searchParams.get('userId') || '';
       if (!/^[A-Za-z0-9_-]{1,64}$/.test(userId)) throw new Error('Invalid User ID.');
+      const linkToken = url.searchParams.get('token') || '';
+      const tokenRecord = publicLinkTokens.get(linkToken);
+      const validPublicToken = tokenRecord?.userId === userId && tokenRecord.expiresAt > Date.now();
+      if (!isAdmin(request) && !validPublicToken) return sendJson(response, 401, { error: 'This linking request has expired. Generate a new link.' });
       const session = getDashboardSessions(manager).find((entry) => entry.userId === userId);
       if (!session) return sendJson(response, 200, { session: null });
       return sendJson(response, 200, {

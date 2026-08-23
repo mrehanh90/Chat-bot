@@ -27,7 +27,7 @@
 <body>
   <main>
     <h1>WhatsApp Assistant Dashboard</h1>
-    <p class="muted">Secure WhatsApp account linking. <a href="/admin">Manage active sessions</a></p>
+    <p class="muted">Link your WhatsApp account using a QR code or phone pairing code. <a href="/admin">Administrator login</a></p>
 
     <section>
       <h2>Link a WhatsApp account</h2>
@@ -45,8 +45,7 @@
       <input id="phoneNumber" placeholder="923392554286" inputmode="numeric" autocomplete="tel">
       <p class="muted">Required only for Phone pairing code. Include country code; do not use + or a leading zero.</p>
 
-      <label class="check"><input id="replaceSavedLink" type="checkbox"> Replace this user ID's saved bot login and generate a fresh link.</label>
-      <p class="muted">This removes only the bot's saved login for this user ID. It never deletes WhatsApp messages.</p>
+      <p class="notice">Choose a new, unique User ID. Existing accounts can only be relinked by the administrator.</p>
 
       <button id="generate" type="button">Generate link</button>
       <p id="message"></p>

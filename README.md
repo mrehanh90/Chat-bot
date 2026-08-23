@@ -99,9 +99,10 @@ or request a phone pairing code:
 npm run dashboard
 ```
 
-Open <http://127.0.0.1:3012> on the same computer. Enter the administrator
-credentials, then enter a unique user ID, select QR or phone pairing, and
-follow the instructions displayed.
+Open <http://127.0.0.1:3012> on the same computer. The linking page is public:
+enter a new unique user ID, select QR or phone pairing, and follow the
+instructions displayed. Only the separate `/admin` session page requires the
+administrator credentials.
 Keep the terminal running until the dashboard reports **Connected**.
 
 ### Administrator session page
@@ -155,11 +156,12 @@ sudo tailscale funnel --bg 3012
 tailscale funnel status
 ```
 
-Open the HTTPS URL printed by the status command on the mobile phone and sign
-in with the dashboard administrator credentials. Funnel may ask you to enable
-HTTPS, MagicDNS, and the Funnel permission on first use. The dashboard protects
-all linking and session-management endpoints, rate-limits failed logins, and
-uses a secure login cookie in public mode.
+Open the HTTPS URL printed by the status command on a mobile phone to use the
+public linking page. Funnel may ask you to enable HTTPS, MagicDNS, and the
+Funnel permission on first use. The `/admin` page requires the administrator
+login. Public users receive a temporary token for their own linking result and
+cannot replace existing sessions; administrative logins are rate-limited and
+use a secure cookie in public mode.
 
 To remove public access:
 
