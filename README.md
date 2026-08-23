@@ -282,6 +282,26 @@ opened on the same computer running the bot because the callback uses
 With the public HTTPS callback configured, the `!calendar connect` link can be
 opened and approved on a phone. The bot must remain running until approval is
 complete. Use `!calendar status` afterward to confirm the connection.
+
+When the dashboard is published with Tailscale Funnel on HTTPS port 443, the
+Calendar callback can use Funnel's separate HTTPS port 10000 without changing
+the dashboard route:
+
+```env
+GOOGLE_CALENDAR_REDIRECT_URI=https://wa.your-tailnet.ts.net:10000/oauth2callback
+GOOGLE_CALENDAR_REDIRECT_PORT=13000
+GOOGLE_CALENDAR_CALLBACK_HOST=127.0.0.1
+```
+
+```bash
+sudo tailscale funnel --bg --https=10000 13000
+tailscale funnel status
+```
+
+Add the exact same HTTPS URI (including `:10000` and `/oauth2callback`) to the
+Google Cloud Web OAuth client's **Authorized redirect URIs**. The scheme, host,
+port, path, and trailing-slash choice must match exactly.
+
 Meetings the AI extracts with a valid date and time are automatically added to
 the connected user's primary Google Calendar with the configured reminder.
 `!calendar add 1` remains available to manually add an older saved task.
