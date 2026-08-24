@@ -437,6 +437,12 @@ class SessionManager {
         }],
       };
     }
+    if (containsLiveQuestion(text)) {
+      return {
+        reply: "I can't access verified live information right now. Please try again shortly or check the official source.",
+        tasks: [],
+      };
+    }
     return { reply: this.fallbackReply(userId), tasks: [] };
   }
 
@@ -495,6 +501,9 @@ class SessionManager {
       const senderName = msg.pushName || undefined;
       const quickReply = getQuickReply(text);
       let result = quickReply ? { reply: quickReply, tasks: [] } : null;
+      if (!result && containsMeetingReference(text)) {
+        result = this.offlineResult(userId, text);
+      }
       if (!result) {
         try {
           result = await openrouterClient.processMessage(
@@ -602,14 +611,18 @@ function containsSchedulingTimeReference(text) {
 function parseExplicitSchedule(text) {
   if (!text) return null;
   const clock = text.match(/\b(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b/i);
-  if (!clock) return null;
+  const oClock = text.match(/\b(\d{1,2})(?::(\d{2}))?\s*o['’]?\s*clock\b/i);
+  if (!clock && !oClock) return null;
 
-  let hour = Number(clock[1]);
-  const minute = Number(clock[2] || 0);
+  const timeMatch = clock || oClock;
+  let hour = Number(timeMatch[1]);
+  const minute = Number(timeMatch[2] || 0);
   if (hour < 1 || hour > 12 || minute > 59) return null;
-  const meridiem = clock[3].toLowerCase().replace(/\./g, '');
-  if (meridiem === 'pm' && hour !== 12) hour += 12;
-  if (meridiem === 'am' && hour === 12) hour = 0;
+  if (clock) {
+    const meridiem = clock[3].toLowerCase().replace(/\./g, '');
+    if (meridiem === 'pm' && hour !== 12) hour += 12;
+    if (meridiem === 'am' && hour === 12) hour = 0;
+  }
 
   const now = currentZonedIso(config.timeZone);
   const offset = now.slice(-6);
@@ -640,11 +653,30 @@ function parseExplicitSchedule(text) {
     return null;
   }
 
-  const candidate = `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00${offset}`;
-  const parsed = new Date(candidate);
   const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
-  if (Number.isNaN(parsed.getTime()) || month < 1 || month > 12 || day < 1 || day > daysInMonth) return null;
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth) return null;
+  const makeCandidate = (candidateHour) => `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(candidateHour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00${offset}`;
+
+  if (oClock) {
+    if (!/\btoday\b/i.test(text)) return null;
+    const possibleHours = hour === 12 ? [0, 12] : [hour, hour + 12];
+    const next = possibleHours
+      .map(makeCandidate)
+      .filter((value) => new Date(value).getTime() > Date.now())
+      .sort((left, right) => new Date(left) - new Date(right))[0];
+    return next || null;
+  }
+
+  const candidate = makeCandidate(hour);
+  if (Number.isNaN(new Date(candidate).getTime())) return null;
   return candidate;
+}
+
+function containsLiveQuestion(text) {
+  const normalized = (text || '').toLowerCase();
+  const currentSignal = /\b(?:today|latest|current|right now|live|now|aaj|aj)\b/.test(normalized);
+  const liveTopic = /\b(?:weather|temperature|forecast|gold|silver|rate|price|exchange|currency|dollar|rupee|news|score|match|availability|stock|market|bank|timing|timings|hours)\b/.test(normalized);
+  return currentSignal && liveTopic;
 }
 
 function extractTimeReference(text) {

@@ -185,12 +185,8 @@ function parseStructuredResponse(raw) {
     return JSON.parse(raw || '{}');
   } catch (err) {
     console.error('[openrouterClient] Failed to parse model output as JSON:', raw);
-    const match = raw?.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)/);
-    const salvaged = match ? match[1].replace(/\\"/g, '"') : null;
     return {
-      reply: salvaged || "Thanks for your message — I'm away right now but will get back to you soon.",
-      needsLiveData: false,
-      tasks: [],
+      parseError: true,
     };
   }
 }
@@ -281,6 +277,7 @@ Message: ${messageText}`,
 
   const rawContent = data.choices?.[0]?.message?.content;
   const parsed = parseStructuredResponse(rawContent);
+  if (parsed.parseError) throw new Error('The AI model returned invalid structured output.');
   let reply = typeof parsed.reply === 'string' ? parsed.reply : '';
 
   if (parsed.needsLiveData) {
