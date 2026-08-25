@@ -3,6 +3,7 @@ const path = require('path');
 
 const SESSIONS_ROOT = path.join(__dirname, '..', 'sessions');
 const USER_ID_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
+const DELETE_MARKER = '.delete-requested';
 
 function assertUserId(userId) {
   if (!USER_ID_PATTERN.test(userId || '')) {
@@ -46,6 +47,19 @@ function listUserIds() {
     .map((entry) => entry.name);
 }
 
+function requestSessionDeletion(userId) {
+  const marker = getSessionPath(userId, DELETE_MARKER);
+  fs.writeFileSync(marker, new Date().toISOString());
+}
+
+function isSessionDeletionRequested(userId) {
+  return fs.existsSync(path.join(getSessionDir(userId), DELETE_MARKER));
+}
+
+function deleteSessionFiles(userId) {
+  fs.rmSync(getSessionDir(userId), { recursive: true, force: true });
+}
+
 module.exports = {
   SESSIONS_ROOT,
   assertUserId,
@@ -54,4 +68,7 @@ module.exports = {
   readSessionMeta,
   writeSessionMeta,
   listUserIds,
+  requestSessionDeletion,
+  isSessionDeletionRequested,
+  deleteSessionFiles,
 };

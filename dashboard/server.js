@@ -8,7 +8,9 @@ const { SessionManager, getDashboardSessions } = require('../index');
 const HOST = process.env.DASHBOARD_HOST || '127.0.0.1';
 const PORT = Number.parseInt(process.env.DASHBOARD_PORT || '3012', 10);
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const manager = new SessionManager();
+// Dashboard sockets are temporary and exist only for QR/pairing. The main bot
+// PM2 process remains the sole long-lived owner of connected WhatsApp sessions.
+const manager = new SessionManager({ releaseAfterLink: true });
 const ADMIN_USERNAME = process.env.DASHBOARD_ADMIN_USERNAME || 'admin';
 const ADMIN_PASSWORD = process.env.DASHBOARD_ADMIN_PASSWORD || 'admin';
 const PUBLIC_ACCESS = String(process.env.DASHBOARD_PUBLIC || 'false').toLowerCase() === 'true';
@@ -173,6 +175,14 @@ const server = http.createServer(async (request, response) => {
       if (!requireAdmin(request, response)) return;
       await manager.stop(stopMatch[1]);
       return sendJson(response, 200, { ok: true });
+    }
+    const deleteMatch = url.pathname.match(/^\/api\/sessions\/([A-Za-z0-9_-]{1,64})$/);
+    if (request.method === 'DELETE' && deleteMatch) {
+      if (!requireAdmin(request, response)) return;
+      // The long-running assistant process owns connected sockets and performs
+      // the final removal after stopping that user's live connection.
+      await manager.requestDeletion(deleteMatch[1]);
+      return sendJson(response, 202, { ok: true });
     }
     return sendJson(response, 404, { error: 'Not found.' });
   } catch (error) {

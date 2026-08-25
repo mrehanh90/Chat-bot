@@ -174,6 +174,13 @@ function saveCalendarEvent(userId, taskId, eventId, eventLink) {
     .run(taskId, 'google', eventId, eventLink || null, new Date().toISOString());
 }
 
+function closeDatabase(userId) {
+  const db = databases.get(userId);
+  if (!db) return;
+  databases.delete(userId);
+  db.close();
+}
+
 module.exports = {
   appendContactLog,
   readLastReplyTimestamps,
@@ -186,4 +193,5 @@ module.exports = {
   deleteCalendarToken,
   readCalendarEvent,
   saveCalendarEvent,
+  closeDatabase,
 };

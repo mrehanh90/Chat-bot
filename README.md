@@ -53,7 +53,7 @@ Important `.env` settings:
 OPENROUTER_API_KEY=your_openrouter_api_key_here
 
 # General replies and task extraction. Free models can be rate-limited.
-OPENROUTER_MODEL=openai/gpt-oss-20b:free
+OPENROUTER_MODEL=openrouter/free
 
 # Used for current/live questions. Requires OpenRouter balance.
 OPENROUTER_LIVE_MODEL=openrouter/auto

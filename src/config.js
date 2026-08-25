@@ -40,7 +40,7 @@ module.exports = {
 
   openRouterModel:
     process.env.OPENROUTER_MODEL?.trim() ||
-    'openai/gpt-oss-20b:free',
+    'openrouter/free',
 
   openRouterLiveModel:
     process.env.OPENROUTER_LIVE_MODEL?.trim() ||

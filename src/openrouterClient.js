@@ -245,9 +245,18 @@ User question: ${messageText}`,
   });
 
   const message = data.choices?.[0]?.message;
-  const answer = (message?.content || '').trim();
+  const answer = extractTextContent(message?.content);
   console.info(`[live-search] ${answer ? 'Answer received' : 'No answer returned'}`);
   return answer ? addSources(answer, message) : '';
+}
+
+function extractTextContent(content) {
+  if (typeof content === 'string') return content.trim();
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((part) => (typeof part === 'string' ? part : part?.text || ''))
+    .join('')
+    .trim();
 }
 
 /**
@@ -257,7 +266,12 @@ User question: ${messageText}`,
  */
 async function processMessage(messageText, senderName, assistantProfile = 'away') {
   if (isLikelyLiveQuestion(messageText)) {
-    const reply = await getLiveAnswer(messageText);
+    let reply = '';
+    try {
+      reply = await getLiveAnswer(messageText);
+    } catch (err) {
+      console.error('[openrouterClient] Live answer failed:', err.message);
+    }
     return {
       reply: reply || "I couldn't find a verified current answer for that right now. Please check the official website or try again shortly.",
       tasks: [],
@@ -301,7 +315,8 @@ function isLikelyLiveQuestion(text) {
   const currentSignal = /\b(?:today|latest|current|right now|live|now|aaj|aj)\b/.test(normalized);
   const liveTopic = /\b(?:weather|temperature|forecast|gold|rate|price|exchange|currency|dollar|rupee|news|score|match|schedule|availability|stock|market|bank|timing|timings|hours)\b/.test(normalized);
   const businessHoursQuestion = /\b(?:bank|branch|office|shop|market)\b.*\b(?:time|timing|timings|hours|open|close|closing)\b|\b(?:time|timing|timings|hours|open|close|closing)\b.*\b(?:bank|branch|office|shop|market)\b/.test(normalized);
-  return (currentSignal && liveTopic) || businessHoursQuestion;
+  const questionSignal = /\?|\b(?:what|how much|which|tell me|kya|kitna|kitni|batao|batain|btao)\b/.test(normalized);
+  return (liveTopic && (currentSignal || questionSignal)) || businessHoursQuestion;
 }
 
 module.exports = { processMessage, transcribeVoiceNote };

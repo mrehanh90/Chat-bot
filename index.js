@@ -26,20 +26,25 @@ const {
   readSessionMeta,
   writeSessionMeta,
   listUserIds,
+  requestSessionDeletion,
+  isSessionDeletionRequested,
+  deleteSessionFiles,
 } = require('./src/sessionStore');
 const {
   appendContactLog,
   readLastReplyTimestamps,
   writeLastReplyTimestamp,
   rememberProcessedMessage,
+  closeDatabase,
 } = require('./src/dataStore');
 
 const logger = pino({ level: 'info' });
 const MAX_PROCESSED_IDS = 2000;
 
 class SessionManager {
-  constructor() {
+  constructor(options = {}) {
     this.sessions = new Map();
+    this.releaseAfterLink = options.releaseAfterLink === true;
   }
 
   async register(userId, pairingNumber = null, replaceSavedLink = false) {
@@ -164,6 +169,49 @@ class SessionManager {
     await Promise.all([...this.sessions.keys()].map((userId) => this.stop(userId)));
   }
 
+  async delete(userId) {
+    assertUserId(userId);
+    requestSessionDeletion(userId);
+    return this.finishDeletion(userId);
+  }
+
+  async requestDeletion(userId) {
+    assertUserId(userId);
+    requestSessionDeletion(userId);
+    await this.stop(userId);
+    closeDatabase(userId);
+  }
+
+  async finishDeletion(userId) {
+    if (!isSessionDeletionRequested(userId)) return false;
+    await this.stop(userId);
+    closeDatabase(userId);
+    try {
+      deleteSessionFiles(userId);
+      logger.info({ userId }, 'Deleted WhatsApp session and its saved data');
+      return true;
+    } catch (err) {
+      // Another process may still be releasing its WhatsApp socket or SQLite
+      // handle. The deletion monitor will retry while the marker remains.
+      logger.warn({ err, userId }, 'Session deletion is pending; will retry');
+      return false;
+    }
+  }
+
+  startDeletionMonitor() {
+    const check = () => {
+      for (const userId of listUserIds()) {
+        if (isSessionDeletionRequested(userId)) {
+          void this.finishDeletion(userId).catch((err) => logger.error({ err, userId }, 'Session deletion failed'));
+        }
+      }
+    };
+    check();
+    const timer = setInterval(check, 2000);
+    timer.unref?.();
+    return timer;
+  }
+
   handleConnectionUpdate(session, state, sock, update) {
     const { connection, lastDisconnect, qr } = update;
     const { userId } = session;
@@ -199,6 +247,13 @@ class SessionManager {
       const ownerJid = jidNormalizedUser(state.creds.me?.lid || state.creds.me?.id);
       writeSessionMeta(userId, { ownerJid, status: 'connected', connectedAt: new Date().toISOString() });
       logger.info({ userId, ownerJid }, 'WhatsApp user session connected');
+
+      // The dashboard only needs to own the socket while a user is linking.
+      // Once credentials have been saved, release that socket so the long-lived
+      // assistant process can be the sole owner of the WhatsApp session.
+      if (this.releaseAfterLink) {
+        setTimeout(() => this.releaseLinkedSession(session, sock), 1000);
+      }
       return;
     }
 
@@ -226,6 +281,20 @@ class SessionManager {
         logger.error({ err, userId }, 'User session reconnect failed');
       }), delayMs);
     }
+  }
+
+  releaseLinkedSession(session, sock) {
+    if (session.sock !== sock || session.connectionStatus !== 'connected') return;
+    session.manuallyStopped = true;
+    session.running = false;
+    clearTimeout(session.reconnectTimer);
+    this.sessions.delete(session.userId);
+    try {
+      sock.end?.(undefined);
+    } catch (err) {
+      logger.warn({ err, userId: session.userId }, 'Error releasing dashboard linking socket');
+    }
+    logger.info({ userId: session.userId }, 'Dashboard released linked session to the assistant service');
   }
 
   rememberMessageId(session, id) {
@@ -559,7 +628,7 @@ function createQrMatrix(value) {
 }
 
 function getDashboardSessions(manager) {
-  return listUserIds().map((userId) => {
+  return listUserIds().filter((userId) => !isSessionDeletionRequested(userId)).map((userId) => {
     const meta = readSessionMeta(userId);
     const active = manager.sessions.get(userId);
     return {
@@ -718,6 +787,7 @@ function printUsage() {
 
 async function main() {
   const manager = new SessionManager();
+  manager.startDeletionMonitor();
   const [command, userId, phoneNumber] = process.argv.slice(2);
 
   console.warn('Privacy notice: this service stores each contact\'s WhatsApp JID, display name, message timestamp, and any location they explicitly share. Voice notes are sent to the configured transcription provider. Ensure you have an appropriate notice and lawful basis before operating it.');
